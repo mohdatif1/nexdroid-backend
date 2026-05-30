@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: nexdroid-backend
+    env: node
+    region: singapore
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_USERNAME
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY_ID
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_CLIENT_ID
+        sync: false
+      - key: FIREBASE_STORAGE_BUCKET
+        sync: false
+      - key: KEYSTORE_BASE64
+        sync: false
+      - key: KEYSTORE_PASSWORD
+        sync: false
+      - key: KEY_ALIAS
+        value: nexdroid
+      - key: KEY_PASSWORD
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
