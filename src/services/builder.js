@@ -75,7 +75,6 @@ android {
             signingConfig signingConfigs.release
         }
     }
-    // AAB support — splits enabled by default for bundles
     bundle {
         language { enableSplit = true }
         density  { enableSplit = true }
@@ -210,132 +209,13 @@ zipStoreBase=GRADLE_USER_HOME
 zipStorePath=wrapper/dists`;
 }
 
-function generateGradlewScript() {
-  return `#!/usr/bin/env sh
-
-##############################################################################
-##
-##  Gradle start up script for UN*X
-##
-##############################################################################
-
-# Attempt to set APP_HOME
-# Resolve links: $0 may be a link
-PRG="$0"
-while [ -h "$PRG" ] ; do
-  ls=\`ls -ld "$PRG"\`
-  link=\`expr "$ls" : '.*-> \\(.*\\)$'\`
-  if expr "$link" : '/.*' > /dev/null; then
-    PRG="$link"
-  else
-    PRG=\`dirname "$PRG"\`"/$link"
-  fi
-done
-SAVED="\`pwd\`"
-cd "\`dirname \\"$PRG\\"\`/" >/dev/null
-APP_HOME="\`pwd -P\`"
-cd "$SAVED" >/dev/null
-
-APP_NAME="Gradle"
-APP_BASE_NAME=\`basename "$0"\`
-
-# Add default JVM options here. You can also use JAVA_OPTS and GRADLE_OPTS to pass JVM options to this script.
-DEFAULT_JVM_OPTS='"-Xmx64m" "-Xms64m"'
-
-# Use the maximum available, or set MAX_FD != -1 to use that value.
-MAX_FD="maximum"
-
-warn () {
-  echo "$*"
-}
-
-die () {
-  echo
-  echo "$*"
-  echo
-  exit 1
-}
-
-# OS specific support (must be 'true' or 'false').
-cygwin=false
-msys=false
-darwin=false
-nonstop=false
-case "\`uname\`" in
-  CYGWIN* )
-    cygwin=true
-    ;;
-  Darwin* )
-    darwin=true
-    ;;
-  MINGW* )
-    msys=true
-    ;;
-  NONSTOP* )
-    nonstop=true
-    ;;
-esac
-
-CLASSPATH=\$APP_HOME/gradle/wrapper/gradle-wrapper.jar
-
-# Determine the Java command to use to start the JVM.
-if [ -n "$JAVA_HOME" ] ; then
-  if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
-    JAVACMD="$JAVA_HOME/jre/sh/java"
-  else
-    JAVACMD="$JAVA_HOME/bin/java"
-  fi
-  if [ ! -x "$JAVACMD" ] ; then
-    die "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME
-
-Please set the JAVA_HOME variable in your environment to match the
-location of your Java installation."
-  fi
-else
-  JAVACMD="java"
-  which java >/dev/null 2>&1 || die "ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH."
-fi
-
-# Increase the maximum file descriptors if we can.
-if [ "$cygwin" = "false" -a "$darwin" = "false" -a "$nonstop" = "false" ] ; then
-  MAX_FD_LIMIT=\`ulimit -H -n\`
-  if [ $? -eq 0 ] ; then
-    if [ "$MAX_FD" = "maximum" -o "$MAX_FD" = "max" ] ; then
-      MAX_FD="$MAX_FD_LIMIT"
-    fi
-    ulimit -n $MAX_FD
-    if [ $? -ne 0 ] ; then
-      warn "Could not set maximum file descriptor limit: $MAX_FD"
-    fi
-  else
-    warn "Could not query maximum file descriptor limit: $MAX_FD_LIMIT"
-  fi
-fi
-
-# For Darwin, add options to specify how the application appears in the dock
-if $darwin; then
-  GRADLE_OPTS="$GRADLE_OPTS \\"-Xdock:name=$APP_NAME\\" \\"-Xdock:icon=$APP_HOME/media/gradle.icns\\""
-fi
-
-# For Cygwin or MSYS, switch paths to Windows format before running java
-if [ "$cygwin" = "true" -o "$msys" = "true" ] ; then
-  APP_HOME=\`cygpath --path --mixed "$APP_HOME"\`
-  CLASSPATH=\`cygpath --path --mixed "$CLASSPATH"\`
-  JAVACMD=\`cygpath --unix "$JAVACMD"\`
-fi
-
-# Escape application args
-save () {
-  for i do printf %s\\\\n "$i" | sed "s/'/'\\\\\\\\''/g;1s/^/'/;\$s/\$/' \\\\\\\\/" ; done
-  echo " "
-}
-APP_ARGS=\`save "$@"\`
-
-# Collect all arguments for the java command, following the shell quoting and substitution rules
-eval set -- $DEFAULT_JVM_OPTS \$JAVA_OPTS \$GRADLE_OPTS "\\"-Dorg.gradle.appname=$APP_BASE_NAME\\"" -classpath "\\"$CLASSPATH\\"" org.gradle.wrapper.GradleWrapperMain "$APP_ARGS"
-
-exec "$JAVACMD" "$@"
-`;
+function generateGradleProperties() {
+  return `# Project-wide Gradle settings.
+android.useAndroidX=true
+android.enableJetifier=true
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+org.gradle.parallel=true
+org.gradle.caching=true`;
 }
 
 function generateSettingsGradle(appName) {
@@ -362,7 +242,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
@@ -387,13 +267,15 @@ jobs:
         run: |
           gradle wrapper --gradle-version 8.2 --distribution-type bin
           chmod +x ./gradlew
-          ls -la gradlew gradle/wrapper/
+          echo "=== gradlew ===" && ls -la gradlew
+          echo "=== wrapper dir ===" && ls -la gradle/wrapper/
 
       - name: Decode Keystore
         env:
           KEYSTORE_BASE64: \${{ secrets.KEYSTORE_BASE64 }}
         run: |
           echo "\$KEYSTORE_BASE64" | base64 --decode > release.keystore
+          ls -lh release.keystore
           echo "Keystore decoded successfully"
 
       - name: Build Signed ${isAAB ? 'AAB (App Bundle)' : 'APK'}
@@ -422,7 +304,7 @@ jobs:
         with:
           name: ${artifactName}
           path: ${outputPath}
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: error
 `;
 }
@@ -441,13 +323,13 @@ function generateProjectFiles(config, htmlCode) {
     // HTML app source
     { path: 'app/src/main/assets/www/index.html', content: htmlCode },
 
-    // AndroidManifest — with all auto-detected + manually selected permissions
+    // AndroidManifest
     {
       path: 'app/src/main/AndroidManifest.xml',
       content: generateAndroidManifest(appName, packageName, versionCode, versionName, minSdk, orientation, permissions)
     },
 
-    // app/build.gradle — with bundle{} block for AAB support
+    // app/build.gradle
     {
       path: 'app/build.gradle',
       content: generateBuildGradle(packageName, versionCode, versionName, minSdk)
@@ -459,11 +341,11 @@ function generateProjectFiles(config, htmlCode) {
     // settings.gradle
     { path: 'settings.gradle', content: generateSettingsGradle(appName) },
 
-    // Gradle wrapper
-    { path: 'gradle/wrapper/gradle-wrapper.properties', content: generateGradleWrapper() },
+    // gradle.properties — AndroidX + performance flags (REQUIRED)
+    { path: 'gradle.properties', content: generateGradleProperties() },
 
-    // gradlew script (must be executable — GitHub Actions needs this)
-    { path: 'gradlew', content: generateGradlewScript(), executable: true },
+    // Gradle wrapper properties (JAR is generated in CI via `gradle wrapper`)
+    { path: 'gradle/wrapper/gradle-wrapper.properties', content: generateGradleWrapper() },
 
     // MainActivity.java
     {
@@ -489,7 +371,7 @@ function generateProjectFiles(config, htmlCode) {
       content: generateAppTheme()
     },
 
-    // GitHub Actions workflow — APK or AAB based on buildType
+    // GitHub Actions workflow
     {
       path: '.github/workflows/build.yml',
       content: generateWorkflow(buildType)
