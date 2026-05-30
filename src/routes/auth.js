@@ -22,12 +22,12 @@ router.post('/register', requireAuth, async (req, res) => {
       });
     }
 
-    // New user — give 3 free credits
+    // New user — give 15 free credits
     const userData = {
       uid,
       email,
       name: req.body.name || name || email.split('@')[0],
-      credits: 3,
+      credits: 15,
       totalBuilds: 0,
       isAdmin: false,
       plan: 'free',
@@ -41,8 +41,8 @@ router.post('/register', requireAuth, async (req, res) => {
     await db.collection('transactions').doc().set({
       uid,
       type: 'credit',
-      amount: 3,
-      reason: 'Signup bonus',
+      amount: 15,
+      reason: "Signup bonus",
       createdAt: new Date()
     });
 
