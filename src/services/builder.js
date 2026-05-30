@@ -383,10 +383,11 @@ jobs:
         with:
           gradle-version: '8.2'
 
-      - name: Make gradlew executable
+      - name: Generate Gradle Wrapper JAR
         run: |
-          chmod +x ./gradlew || true
-          ls -la gradlew
+          gradle wrapper --gradle-version 8.2 --distribution-type bin
+          chmod +x ./gradlew
+          ls -la gradlew gradle/wrapper/
 
       - name: Decode Keystore
         env:
