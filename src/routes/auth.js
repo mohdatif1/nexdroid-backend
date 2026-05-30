@@ -1,13 +1,13 @@
 const express = require('express');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireAuthOrNew } = require('../middleware/auth');
 const { getDB } = require('../services/firebase');
 
 const router = express.Router();
 
 // ─── POST /api/auth/register ──────────────────────────────
-// Called after Firebase signup to create Firestore user doc
-router.post('/register', requireAuth, async (req, res) => {
-  const { uid, email, name } = req.user;
+// requireAuthOrNew — token verify karo but user na ho to bhi allow karo
+router.post('/register', requireAuthOrNew, async (req, res) => {
+  const { uid, email, name: tokenName } = req.user;
   const db = getDB();
 
   try {
@@ -15,20 +15,21 @@ router.post('/register', requireAuth, async (req, res) => {
     const existing = await ref.get();
 
     if (existing.exists) {
-      // Already registered — return existing data
+      console.log('[Register] User already exists:', uid);
       return res.json({
         success: true,
         user: { uid, email, ...existing.data() }
       });
     }
 
-    // New user — give 15 free credits
+    // New user — 15 free credits
     const userData = {
       uid,
       email,
-      name: req.body.name || name || email.split('@')[0],
+      name: req.body.name || tokenName || email.split('@')[0],
       credits: 15,
       totalBuilds: 0,
+      aiGenerated: 0,
       isAdmin: false,
       plan: 'free',
       createdAt: new Date(),
@@ -37,7 +38,7 @@ router.post('/register', requireAuth, async (req, res) => {
 
     await ref.set(userData);
 
-    // Log bonus credits
+    // Signup bonus transaction log
     await db.collection('transactions').doc().set({
       uid,
       type: 'credit',
@@ -46,10 +47,12 @@ router.post('/register', requireAuth, async (req, res) => {
       createdAt: new Date()
     });
 
+    console.log('[Register] New user created:', uid, '— 15 credits given');
     res.json({ success: true, user: userData });
+
   } catch (err) {
     console.error('[Auth Register]', err.message);
-    res.status(500).json({ error: 'Registration failed' });
+    res.status(500).json({ error: 'Registration failed: ' + err.message });
   }
 });
 
@@ -60,8 +63,9 @@ router.get('/me', requireAuth, async (req, res) => {
     uid: req.user.uid,
     email: req.user.email,
     name: data.name,
-    credits: data.credits,
+    credits: data.credits || 0,
     totalBuilds: data.totalBuilds || 0,
+    aiGenerated: data.aiGenerated || 0,
     plan: data.plan || 'free',
     isAdmin: data.isAdmin || false
   });
