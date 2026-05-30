@@ -22,8 +22,10 @@ async function createRepo(repoName) {
 }
 
 // ─── Push file to repo ────────────────────────────────────
-async function pushFile(repoName, filePath, content, message = 'Add file') {
-  const encoded = Buffer.from(content).toString('base64');
+async function pushFile(repoName, filePath, content, message = 'Add file', alreadyBase64 = false) {
+  const encoded = alreadyBase64
+    ? content                                      // PNG icons — already base64
+    : Buffer.from(content, 'utf8').toString('base64'); // text files
   await axios.put(
     `${GH_API}/repos/${GH_OWNER}/${repoName}/contents/${filePath}`,
     { message, content: encoded },
@@ -34,7 +36,7 @@ async function pushFile(repoName, filePath, content, message = 'Add file') {
 // ─── Push multiple files ──────────────────────────────────
 async function pushFiles(repoName, files) {
   for (const file of files) {
-    await pushFile(repoName, file.path, file.content, `Add ${file.path}`);
+    await pushFile(repoName, file.path, file.content, `Add ${file.path}`, file.alreadyBase64 === true);
   }
 }
 
