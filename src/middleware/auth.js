@@ -1,7 +1,7 @@
 const { getAuth } = require('../services/firebase');
 const { getDB } = require('../services/firebase');
 
-// Verify Firebase ID token
+// ─── FULL AUTH — token + Firestore user required ──────────
 async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -13,20 +13,45 @@ async function requireAuth(req, res, next) {
     const decoded = await getAuth().verifyIdToken(token);
     req.user = decoded;
 
-    // Get user data from Firestore
     const db = getDB();
     const userDoc = await db.collection('users').doc(decoded.uid).get();
     if (!userDoc.exists) {
-      return res.status(401).json({ error: 'User not found' });
+      return res.status(401).json({ error: 'User not found. Please register first.' });
     }
     req.userData = userDoc.data();
     next();
   } catch (err) {
+    console.error('[requireAuth]', err.message);
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
 
-// Check user has enough credits
+// ─── NEW USER AUTH — token verify karo, Firestore na ho to bhi allow ─
+// Sirf /register route ke liye use hoga
+async function requireAuthOrNew(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
+  const token = authHeader.split('Bearer ')[1];
+  try {
+    const decoded = await getAuth().verifyIdToken(token);
+    req.user = decoded;
+
+    // Firestore user check — na mile to bhi next() — naya user hai
+    const db = getDB();
+    const userDoc = await db.collection('users').doc(decoded.uid).get();
+    req.userData = userDoc.exists ? userDoc.data() : null;
+
+    next();
+  } catch (err) {
+    console.error('[requireAuthOrNew]', err.message);
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// ─── CREDITS CHECK ────────────────────────────────────────
 function requireCredits(amount) {
   return (req, res, next) => {
     const userCredits = req.userData?.credits || 0;
@@ -41,7 +66,7 @@ function requireCredits(amount) {
   };
 }
 
-// Admin only
+// ─── ADMIN ONLY ───────────────────────────────────────────
 function requireAdmin(req, res, next) {
   if (!req.userData?.isAdmin) {
     return res.status(403).json({ error: 'Admin access required' });
@@ -49,4 +74,4 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-module.exports = { requireAuth, requireCredits, requireAdmin };
+module.exports = { requireAuth, requireAuthOrNew, requireCredits, requireAdmin };
