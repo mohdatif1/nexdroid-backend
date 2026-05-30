@@ -39,7 +39,7 @@ async function pushFiles(repoName, files) {
 }
 
 // ─── Trigger GitHub Actions workflow ─────────────────────
-async function triggerWorkflow(repoName, workflowFile = 'build-apk.yml', inputs = {}) {
+async function triggerWorkflow(repoName, workflowFile = 'build.yml', inputs = {}) {
   await axios.post(
     `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/workflows/${workflowFile}/dispatches`,
     { ref: 'main', inputs },
@@ -65,20 +65,22 @@ async function getRunStatus(repoName, runId) {
   return res.data;
 }
 
-// ─── Download APK artifact ────────────────────────────────
-async function downloadArtifact(repoName, runId) {
+// ─── Download artifact (APK or AAB) ──────────────────────
+async function downloadArtifact(repoName, runId, artifactName = 'release-apk') {
   // List artifacts
   const res = await axios.get(
     `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/runs/${runId}/artifacts`,
     { headers: ghHeaders }
   );
   const artifacts = res.data.artifacts || [];
-  const apkArtifact = artifacts.find(a => a.name === 'release-apk');
-  if (!apkArtifact) return null;
+
+  // Find by name, fallback to first artifact
+  const artifact = artifacts.find(a => a.name === artifactName) || artifacts[0];
+  if (!artifact) return null;
 
   // Download zip
   const dlRes = await axios.get(
-    `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/artifacts/${apkArtifact.id}/zip`,
+    `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/artifacts/${artifact.id}/zip`,
     { headers: ghHeaders, responseType: 'arraybuffer', maxRedirects: 5 }
   );
   return dlRes.data;
