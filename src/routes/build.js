@@ -52,10 +52,9 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
     minSdk       = '23',
     orientation  = 'portrait',
     permissions  = [],
-    buildType    = 'apk'   // 'apk' | 'aab'
+    buildType    = 'apk'
   } = req.body;
 
-  // ── Validation ──────────────────────────────────────────
   if (!htmlCode || htmlCode.trim().length < 20)
     return res.status(400).json({ error: 'HTML code is required' });
   if (!appName || !appName.trim())
@@ -75,7 +74,6 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
   try {
     const db = getDB();
 
-    // Create build doc in Firestore
     await db.collection('builds').doc(buildId).set({
       buildId,
       uid,
@@ -95,13 +93,10 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
       updatedAt: new Date()
     });
 
-    // Deduct 5 credits
     await deductCredits(uid, 5, `${isAAB ? 'AAB' : 'APK'} build: ${appName}`);
 
-    // Respond immediately — pipeline runs async
     res.json({ success: true, buildId, status: 'queued', buildType });
 
-    // Run pipeline in background
     runBuildPipeline(buildId, repoName, uid, {
       htmlCode, appName, packageName,
       versionCode, versionName, minSdk, orientation, permissions, buildType
@@ -139,37 +134,29 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
   };
 
   try {
-    // 1. Create GitHub repo
     await log('Creating build repository...', 5);
     await github.createRepo(repoName);
 
-    // 2. Generate all project files (includes workflow)
     await log('Generating Android project files...', 15);
     const files = generateProjectFiles(config, config.htmlCode);
 
-    // 3. Push all files (workflow is already included via builder.js)
     await log('Pushing project to GitHub...', 30);
     await github.pushFiles(repoName, files);
 
-    // 4. Trigger GitHub Actions
     await log(`Triggering ${isAAB ? 'AAB' : 'APK'} build on GitHub Actions...`, 40);
     await github.triggerWorkflow(repoName, 'build.yml');
 
-    // 5. Poll until complete
     await log(`Compiling & signing ${isAAB ? 'App Bundle (AAB)' : 'APK'} — takes ~3-5 min...`, 50);
     const runId = await pollForRun(repoName, buildId, db);
 
-    // 6. Download artifact from GitHub
     await log('Downloading build artifact...', 88);
     const artifactName = isAAB ? 'release-aab' : 'release-apk';
     const zipBuffer    = await github.downloadArtifact(repoName, runId, artifactName);
     if (!zipBuffer) throw new Error(`${isAAB ? 'AAB' : 'APK'} artifact not found`);
 
-    // 7. Extract + upload to Firebase Storage
     await log('Uploading signed file to storage...', 93);
     const fileUrl = await uploadToStorage(zipBuffer, uid, buildId, isAAB);
 
-    // 8. Done
     const doneMsg = isAAB
       ? 'Build complete! Signed AAB ready for Play Store.'
       : 'Build complete! Signed APK ready to install.';
@@ -178,14 +165,13 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
     await db.collection('builds').doc(buildId).update({
       status:      'success',
       progress:    100,
-      fileUrl,                     // generic key for both APK + AAB
+      fileUrl,
       apkUrl:      isAAB ? null : fileUrl,
       aabUrl:      isAAB ? fileUrl : null,
       completedAt: new Date(),
       updatedAt:   new Date()
     });
 
-    // Update user totalBuilds
     await db.collection('users').doc(uid).update({
       totalBuilds: admin.firestore.FieldValue.increment(1)
     });
@@ -197,7 +183,6 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
       updatedAt: new Date()
     });
   } finally {
-    // Cleanup temp repo after 10s
     setTimeout(() => github.deleteRepo(repoName), 10000);
   }
 }
@@ -209,7 +194,6 @@ async function pollForRun(repoName, buildId, db) {
   let runId    = null;
   let step     = 0;
 
-  // Wait for run to appear (max 5 min)
   while (!runId && attempts < 20) {
     await sleep(15000);
     const run = await github.getLatestRun(repoName);
@@ -218,12 +202,10 @@ async function pollForRun(repoName, buildId, db) {
   }
   if (!runId) throw new Error('GitHub Actions run did not start');
 
-  // Poll run status (max 10 min total)
   while (attempts < 60) {
     await sleep(15000);
     const run = await github.getRunStatus(repoName, runId);
 
-    // Increment progress bar gradually
     if (step < progressSteps.length) {
       await db.collection('builds').doc(buildId).update({
         progress:  progressSteps[step++],
@@ -259,13 +241,28 @@ async function uploadToStorage(zipBuffer, uid, buildId, isAAB) {
 
   await file.save(fileBuffer, { metadata: { contentType: mimeType } });
 
-  // Signed URL valid for 7 days
   const [url] = await file.getSignedUrl({
     action:  'read',
     expires: Date.now() + 7 * 24 * 60 * 60 * 1000
   });
   return url;
 }
+
+// ─── GET /api/build/download/:id ─────────────────────────
+router.get('/download/:id', requireAuth, async (req, res) => {
+  try {
+    const db  = getDB();
+    const doc = await db.collection('builds').doc(req.params.id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Build not found' });
+    const data = doc.data();
+    if (data.uid !== req.user.uid && !req.userData?.isAdmin)
+      return res.status(403).json({ error: 'Access denied' });
+    if (!data.fileUrl) return res.status(404).json({ error: 'File not ready yet' });
+    res.redirect(data.fileUrl);
+  } catch (err) {
+    res.status(500).json({ error: 'Download failed' });
+  }
+});
 
 // ─── GET /api/build/user/list ─────────────────────────────
 router.get('/user/list', requireAuth, async (req, res) => {
