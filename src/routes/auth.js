@@ -42,7 +42,7 @@ router.post('/register', requireAuth, async (req, res) => {
       uid,
       type: 'credit',
       amount: 15,
-      reason: "Signup bonus",
+      reason: 'Signup bonus',
       createdAt: new Date()
     });
 
