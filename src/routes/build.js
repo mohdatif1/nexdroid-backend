@@ -52,7 +52,8 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
     minSdk       = '23',
     orientation  = 'portrait',
     permissions  = [],
-    buildType    = 'apk'
+    buildType    = 'apk',
+    iconBase64   = null
   } = req.body;
 
   if (!htmlCode || htmlCode.trim().length < 20)
@@ -99,7 +100,8 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
 
     runBuildPipeline(buildId, repoName, uid, {
       htmlCode, appName, packageName,
-      versionCode, versionName, minSdk, orientation, permissions, buildType
+      versionCode, versionName, minSdk, orientation, permissions, buildType,
+      iconBase64
     }).catch(err => {
       console.error(`[Build ${buildId}] Fatal:`, err.message);
       updateBuildStatus(buildId, 'failed', 0, `Fatal error: ${err.message}`);
@@ -140,8 +142,16 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
     await log('Generating Android project files...', 15);
     const files = generateProjectFiles(config, config.htmlCode);
 
+    // Fix encoding: PNG icon files are already base64, text files are not.
+    // github.pushFile handles encoding based on alreadyBase64 flag.
+    const filesForGithub = files.map(f => ({
+      path: f.path,
+      content: f.content,
+      alreadyBase64: f.encoding === 'base64'
+    }));
+
     await log('Pushing project to GitHub...', 30);
-    await github.pushFiles(repoName, files);
+    await github.pushFiles(repoName, filesForGithub);
 
     await log(`Triggering ${isAAB ? 'AAB' : 'APK'} build on GitHub Actions...`, 40);
     await sleep(5000); // Wait for GitHub to index workflow files
