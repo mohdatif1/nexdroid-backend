@@ -309,12 +309,48 @@ jobs:
 `;
 }
 
+// ─── Icon helper ─────────────────────────────────────────
+// iconBase64: pure base64 string of PNG (no data: prefix)
+// Returns array of {path, content, encoding} for all mipmap densities
+function generateIconFiles(iconBase64) {
+  if (!iconBase64) return [];
+
+  // Strip data URI prefix if present
+  const base64 = iconBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+
+  // Android mipmap density folders and their icon sizes
+  const densities = [
+    { folder: 'mipmap-mdpi',    size: 48  },
+    { folder: 'mipmap-hdpi',    size: 72  },
+    { folder: 'mipmap-xhdpi',   size: 96  },
+    { folder: 'mipmap-xxhdpi',  size: 144 },
+    { folder: 'mipmap-xxxhdpi', size: 192 },
+  ];
+
+  const files = [];
+  for (const { folder } of densities) {
+    // Same icon for all densities (GitHub Actions will use as-is)
+    files.push({
+      path: `app/src/main/res/${folder}/ic_launcher.png`,
+      content: base64,
+      encoding: 'base64',
+    });
+    files.push({
+      path: `app/src/main/res/${folder}/ic_launcher_round.png`,
+      content: base64,
+      encoding: 'base64',
+    });
+  }
+  return files;
+}
+
 // ─── Build full project file list ────────────────────────
 function generateProjectFiles(config, htmlCode) {
   const {
     appName, packageName, versionCode, versionName,
     minSdk, orientation, permissions,
-    buildType = 'apk'   // 'apk' | 'aab'
+    buildType = 'apk',   // 'apk' | 'aab'
+    iconBase64 = null,   // base64 PNG string for app icon
   } = config;
 
   const pkgPath = packageName.replace(/\./g, '/');
@@ -376,7 +412,17 @@ function generateProjectFiles(config, htmlCode) {
       path: '.github/workflows/build.yml',
       content: generateWorkflow(buildType)
     },
+
+    // App icon — all mipmap densities
+    // If no icon provided, a default placeholder is used so build never fails
+    ...generateIconFiles(iconBase64 || _defaultIconBase64()),
   ];
+}
+
+// Minimal valid PNG (48x48 blue square) as fallback icon
+function _defaultIconBase64() {
+  // Blue #3b7eff 48x48 PNG
+  return 'iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAQUlEQVR4nO3OQQ0AIAwAsfnCG9bBBcejSQV01j5fmXwgJCQkVA+EhISE6oGQkJBQPRASEhKqB0JCQkL1QEhI6LELyaR44svvHicAAAAASUVORK5CYII=';
 }
 
 module.exports = { generateProjectFiles, generateWorkflow };
