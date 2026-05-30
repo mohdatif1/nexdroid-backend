@@ -144,6 +144,7 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
     await github.pushFiles(repoName, files);
 
     await log(`Triggering ${isAAB ? 'AAB' : 'APK'} build on GitHub Actions...`, 40);
+    await sleep(5000); // Wait for GitHub to index workflow files
     await github.triggerWorkflow(repoName, 'build.yml');
 
     await log(`Compiling & signing ${isAAB ? 'App Bundle (AAB)' : 'APK'} — takes ~3-5 min...`, 50);
