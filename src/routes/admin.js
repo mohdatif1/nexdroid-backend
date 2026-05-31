@@ -143,8 +143,81 @@ router.get('/builds', async (req, res) => {
   }
 });
 
-// ─── POST /api/admin/approve-payment ─────────────────────
-router.post('/approve-payment', async (req, res) => {
+// ─── GET /api/admin/plans ─────────────────────────────────
+router.get('/plans', async (req, res) => {
+  const db = getDB();
+  try {
+    const snap = await db.collection('plans').orderBy('createdAt', 'asc').get();
+    const plans = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.json({ plans });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch plans' });
+  }
+});
+
+// ─── POST /api/admin/plans ────────────────────────────────
+router.post('/plans', async (req, res) => {
+  const { name, price, credits } = req.body;
+  if (!name || price === undefined || !credits || credits < 1) {
+    return res.status(400).json({ error: 'name, price, and credits are required' });
+  }
+  const db = getDB();
+  try {
+    const ref = await db.collection('plans').add({
+      name,
+      price: Number(price),
+      credits: Number(credits),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      createdBy: req.user.uid
+    });
+    res.json({ success: true, id: ref.id });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create plan' });
+  }
+});
+
+// ─── PUT /api/admin/plans/:planId ─────────────────────────
+router.put('/plans/:planId', async (req, res) => {
+  const { planId } = req.params;
+  const { name, price, credits } = req.body;
+  if (!name || price === undefined || !credits || credits < 1) {
+    return res.status(400).json({ error: 'name, price, and credits are required' });
+  }
+  const db = getDB();
+  try {
+    const ref = db.collection('plans').doc(planId);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Plan not found' });
+    await ref.update({
+      name,
+      price: Number(price),
+      credits: Number(credits),
+      updatedAt: new Date(),
+      updatedBy: req.user.uid
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update plan' });
+  }
+});
+
+// ─── DELETE /api/admin/plans/:planId ──────────────────────
+router.delete('/plans/:planId', async (req, res) => {
+  const { planId } = req.params;
+  const db = getDB();
+  try {
+    const ref = db.collection('plans').doc(planId);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Plan not found' });
+    await ref.delete();
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete plan' });
+  }
+});
+
+// ─── POST /api/admin/approve-payment ─────────────────────router.post('/approve-payment', async (req, res) => {
   const { txnId, uid, credits, paidAmount } = req.body;
   if (!txnId || !uid || !credits) {
     return res.status(400).json({ error: 'Missing fields' });
