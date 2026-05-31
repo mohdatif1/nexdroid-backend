@@ -217,7 +217,8 @@ router.delete('/plans/:planId', async (req, res) => {
   }
 });
 
-// ─── POST /api/admin/approve-payment ─────────────────────router.post('/approve-payment', async (req, res) => {
+// ─── POST /api/admin/approve-payment ─────────────────────
+router.post('/approve-payment', async (req, res) => {
   const { txnId, uid, credits, paidAmount } = req.body;
   if (!txnId || !uid || !credits) {
     return res.status(400).json({ error: 'Missing fields' });
