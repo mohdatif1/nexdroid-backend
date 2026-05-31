@@ -46,4 +46,55 @@ router.post('/submit', requireAuth, async (req, res) => {
   }
 });
 
+// ─── GET /api/payment/transactions ───────────────────────
+// Logged-in user ki saari transactions return karo
+router.get('/transactions', requireAuth, async (req, res) => {
+  const db = getDB();
+  try {
+    let snap;
+    try {
+      snap = await db.collection('transactions')
+        .where('uid', '==', req.user.uid)
+        .where('type', '==', 'credit')
+        .orderBy('createdAt', 'desc')
+        .limit(50)
+        .get();
+    } catch (e) {
+      // Index missing fallback
+      snap = await db.collection('transactions')
+        .where('uid', '==', req.user.uid)
+        .where('type', '==', 'credit')
+        .limit(50)
+        .get();
+    }
+
+    const transactions = snap.docs.map(d => {
+      const data = d.data();
+      return {
+        id:          d.id,
+        planName:    data.planName    || 'Credit Purchase',
+        credits:     data.credits     || 0,
+        price:       data.price       || 0,
+        paidAmount:  data.paidAmount  || data.price || 0,
+        txnRef:      data.txnRef      || '',
+        status:      data.status      || 'pending',
+        createdAt:   data.createdAt,
+        approvedAt:  data.approvedAt  || null,
+      };
+    });
+
+    // In-memory sort (fallback ke liye)
+    transactions.sort((a, b) => {
+      const ta = a.createdAt?._seconds || 0;
+      const tb = b.createdAt?._seconds || 0;
+      return tb - ta;
+    });
+
+    res.json({ transactions });
+  } catch (err) {
+    console.error('transactions fetch error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
 module.exports = router;
