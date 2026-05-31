@@ -8,6 +8,7 @@ const buildRoutes = require('./routes/build');
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
 const publicRoutes = require('./routes/public');
+const paymentRoutes = require('./routes/payment');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -47,6 +48,7 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/build', buildRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/public', publicRoutes);
+app.use('/api/payment', paymentRoutes);
 
 // Health check
 app.get('/', (req, res) => {
