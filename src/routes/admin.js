@@ -244,4 +244,34 @@ router.post('/approve-payment', async (req, res) => {
   }
 });
 
+// ─── GET /api/admin/settings ──────────────────────────────
+router.get('/settings', async (req, res) => {
+  const db = getDB();
+  try {
+    const doc = await db.collection('settings').doc('payment').get();
+    const data = doc.exists ? doc.data() : {};
+    res.json({ upiId: data.upiId || '', qrImageUrl: data.qrImageUrl || '' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
+// ─── PUT /api/admin/settings ──────────────────────────────
+router.put('/settings', async (req, res) => {
+  const { upiId, qrImageUrl } = req.body;
+  if (!upiId && !qrImageUrl) {
+    return res.status(400).json({ error: 'upiId or qrImageUrl required' });
+  }
+  const db = getDB();
+  try {
+    const update = { updatedAt: new Date(), updatedBy: req.user.uid };
+    if (upiId !== undefined)      update.upiId      = upiId;
+    if (qrImageUrl !== undefined) update.qrImageUrl = qrImageUrl;
+    await db.collection('settings').doc('payment').set(update, { merge: true });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
 module.exports = router;
