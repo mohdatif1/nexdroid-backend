@@ -2,7 +2,7 @@ const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const admin = require('firebase-admin');
 const { requireAuth, requireCredits } = require('../middleware/auth');
-const { getDB, getStorage } = require('../services/firebase');
+const { getDB } = require('../services/firebase');
 const github = require('../services/github');
 const { generateProjectFiles } = require('../services/builder');
 
@@ -182,13 +182,10 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
     await log(`Compiling & signing ${isAAB ? 'App Bundle (AAB)' : 'APK'} — takes ~3-5 min...`, 50);
     const runId = await pollForRun(repoName, buildId, db);
 
-    await log('Downloading build artifact...', 88);
+    await log('Fetching artifact download link...', 88);
     const artifactName = isAAB ? 'release-aab' : 'release-apk';
-    const zipBuffer    = await github.downloadArtifact(repoName, runId, artifactName);
-    if (!zipBuffer) throw new Error(`${isAAB ? 'AAB' : 'APK'} artifact not found`);
-
-    await log('Uploading signed file to storage...', 93);
-    const fileUrl = await uploadToStorage(zipBuffer, uid, buildId, isAAB);
+    const artifactInfo = await github.getArtifactUrl(repoName, runId, artifactName);
+    if (!artifactInfo) throw new Error(`${isAAB ? 'AAB' : 'APK'} artifact not found`);
 
     const doneMsg = isAAB
       ? 'Build complete! Signed AAB ready for Play Store.'
@@ -198,9 +195,11 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
     await db.collection('builds').doc(buildId).update({
       status:      'success',
       progress:    100,
-      fileUrl,
-      apkUrl:      isAAB ? null : fileUrl,
-      aabUrl:      isAAB ? fileUrl : null,
+      fileUrl:     artifactInfo.downloadUrl,
+      artifactId:  artifactInfo.artifactId,
+      repoName,
+      apkUrl:      isAAB ? null : artifactInfo.downloadUrl,
+      aabUrl:      isAAB ? artifactInfo.downloadUrl : null,
       completedAt: new Date(),
       updatedAt:   new Date()
     });
@@ -254,33 +253,8 @@ async function pollForRun(repoName, buildId, db) {
   throw new Error('Build timed out after 10 minutes');
 }
 
-// ─── Extract from zip + upload to Firebase Storage ────────
-async function uploadToStorage(zipBuffer, uid, buildId, isAAB) {
-  const AdmZip = require('adm-zip');
-  const zip     = new AdmZip(zipBuffer);
-  const ext     = isAAB ? '.aab' : '.apk';
-  const entry   = zip.getEntries().find(e => e.entryName.endsWith(ext));
-  if (!entry) throw new Error(`${ext} not found in artifact zip`);
-
-  const fileBuffer = entry.getData();
-  const mimeType   = isAAB
-    ? 'application/octet-stream'
-    : 'application/vnd.android.package-archive';
-  const fileName   = `builds/${uid}/${buildId}/app-release${ext}`;
-
-  const bucket = getStorage();
-  const file   = bucket.file(fileName);
-
-  await file.save(fileBuffer, { metadata: { contentType: mimeType } });
-
-  const [url] = await file.getSignedUrl({
-    action:  'read',
-    expires: Date.now() + 7 * 24 * 60 * 60 * 1000
-  });
-  return url;
-}
-
 // ─── GET /api/build/download/:id ─────────────────────────
+// Proxies GitHub artifact zip download to user
 router.get('/download/:id', requireAuth, async (req, res) => {
   try {
     const db  = getDB();
@@ -289,9 +263,33 @@ router.get('/download/:id', requireAuth, async (req, res) => {
     const data = doc.data();
     if (data.uid !== req.user.uid && !req.userData?.isAdmin)
       return res.status(403).json({ error: 'Access denied' });
-    if (!data.fileUrl) return res.status(404).json({ error: 'File not ready yet' });
-    res.redirect(data.fileUrl);
+    if (!data.artifactId || !data.repoName)
+      return res.status(404).json({ error: 'File not ready yet' });
+
+    const axios = require('axios');
+    const GH_TOKEN = process.env.GITHUB_TOKEN;
+    const GH_OWNER = process.env.GITHUB_USERNAME;
+    const ext = data.aabUrl ? '.aab' : '.apk';
+
+    const ghRes = await axios.get(
+      `https://api.github.com/repos/${GH_OWNER}/${data.repoName}/actions/artifacts/${data.artifactId}/zip`,
+      {
+        headers: {
+          Authorization: `Bearer ${GH_TOKEN}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28'
+        },
+        responseType: 'stream',
+        maxRedirects: 5
+      }
+    );
+
+    res.setHeader('Content-Disposition', `attachment; filename="app-release${ext}.zip"`);
+    res.setHeader('Content-Type', 'application/zip');
+    ghRes.data.pipe(res);
+
   } catch (err) {
+    console.error('Download error:', err.message);
     res.status(500).json({ error: 'Download failed' });
   }
 });
