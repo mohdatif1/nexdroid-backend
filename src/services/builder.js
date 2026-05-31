@@ -225,7 +225,8 @@ include ':app'`;
 
 // ─── Generate GitHub Actions workflow ────────────────────
 // buildType: 'apk' | 'aab'
-function generateWorkflow(buildType = 'apk') {
+// keystoreConfig: { alias, storePassword, keyPassword, cn, org, country }
+function generateWorkflow(buildType = 'apk', keystoreConfig = {}) {
   const isAAB = buildType === 'aab';
   const gradleTask   = isAAB ? 'bundleRelease'   : 'assembleRelease';
   const artifactName = isAAB ? 'release-aab'     : 'release-apk';
@@ -233,6 +234,13 @@ function generateWorkflow(buildType = 'apk') {
     ? 'app/build/outputs/bundle/release/app-release.aab'
     : 'app/build/outputs/apk/release/app-release.apk';
   const fileExt = isAAB ? 'aab' : 'apk';
+
+  const ksAlias     = (keystoreConfig.alias         || 'release').replace(/'/g, '');
+  const ksStorePass = (keystoreConfig.storePassword || '').replace(/'/g, '');
+  const ksKeyPass   = (keystoreConfig.keyPassword   || '').replace(/'/g, '');
+  const ksCN        = (keystoreConfig.cn            || 'Unknown').replace(/'/g, '');
+  const ksOrg       = (keystoreConfig.org           || 'Unknown').replace(/'/g, '');
+  const ksCountry   = (keystoreConfig.country       || 'IN').replace(/'/g, '');
 
   return `name: Build Signed ${isAAB ? 'AAB' : 'APK'}
 
@@ -248,10 +256,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK 11
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '11'
           distribution: 'temurin'
           cache: gradle
 
@@ -270,20 +278,27 @@ jobs:
           echo "=== gradlew ===" && ls -la gradlew
           echo "=== wrapper dir ===" && ls -la gradle/wrapper/
 
-      - name: Decode Keystore
-        env:
-          KEYSTORE_BASE64: \${{ secrets.KEYSTORE_BASE64 }}
+      - name: Generate Keystore
         run: |
-          echo "\$KEYSTORE_BASE64" | base64 --decode > release.keystore
+          keytool -genkey -v \\\\
+            -keystore release.keystore \\\\
+            -alias '${ksAlias}' \\\\
+            -keyalg RSA \\\\
+            -keysize 2048 \\\\
+            -validity 10000 \\\\
+            -storetype JKS \\\\
+            -storepass '${ksStorePass}' \\\\
+            -keypass '${ksKeyPass}' \\\\
+            -dname "CN=${ksCN}, O=${ksOrg}, L=Unknown, ST=Unknown, C=${ksCountry}"
+          echo "Keystore generated"
           ls -lh release.keystore
-          echo "Keystore decoded successfully"
 
       - name: Build Signed ${isAAB ? 'AAB (App Bundle)' : 'APK'}
         env:
           KEYSTORE_PATH: \${{ github.workspace }}/release.keystore
-          KEYSTORE_PASSWORD: \${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: \${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: \${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: '${ksStorePass}'
+          KEY_ALIAS: '${ksAlias}'
+          KEY_PASSWORD: '${ksKeyPass}'
         run: |
           ./gradlew ${gradleTask} --no-daemon --stacktrace
           echo "Build completed successfully"
@@ -351,6 +366,7 @@ function generateProjectFiles(config, htmlCode) {
     minSdk, orientation, permissions,
     buildType = 'apk',   // 'apk' | 'aab'
     iconBase64 = null,   // base64 PNG string for app icon
+    keystoreConfig = {}, // { alias, storePassword, keyPassword, cn, org, country }
   } = config;
 
   const pkgPath = packageName.replace(/\./g, '/');
@@ -410,7 +426,7 @@ function generateProjectFiles(config, htmlCode) {
     // GitHub Actions workflow
     {
       path: '.github/workflows/build.yml',
-      content: generateWorkflow(buildType)
+      content: generateWorkflow(buildType, keystoreConfig)
     },
 
     // App icon — all mipmap densities
