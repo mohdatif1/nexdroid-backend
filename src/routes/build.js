@@ -303,33 +303,56 @@ router.get('/download/:id', requireAuth, async (req, res) => {
 // ─── GET /api/build/user/list ─────────────────────────────
 router.get('/user/list', requireAuth, async (req, res) => {
   try {
-    const db   = getDB();
-    const snap = await db.collection('builds')
-      .where('uid', '==', req.user.uid)
-      .orderBy('createdAt', 'desc')
-      .limit(20)
-      .get();
+    const db = getDB();
+    let snap;
+
+    try {
+      // Try with orderBy first (requires composite index)
+      snap = await db.collection('builds')
+        .where('uid', '==', req.user.uid)
+        .orderBy('createdAt', 'desc')
+        .limit(20)
+        .get();
+    } catch (indexErr) {
+      // Composite index missing — fallback: fetch without orderBy, sort in memory
+      console.warn('Firestore index missing, falling back to in-memory sort:', indexErr.message);
+      snap = await db.collection('builds')
+        .where('uid', '==', req.user.uid)
+        .limit(20)
+        .get();
+    }
 
     const builds = snap.docs.map(d => {
       const data = d.data();
       return {
         buildId:     data.buildId,
-        appName:     data.appName,
-        packageName: data.packageName,
-        buildType:   data.buildType || 'apk',
-        status:      data.status,
-        progress:    data.progress,
-        fileUrl:     data.fileUrl  || null,
-        apkUrl:      data.apkUrl   || null,
-        aabUrl:      data.aabUrl   || null,
+        appName:     data.appName     || 'Unknown App',
+        packageName: data.packageName || '',
+        buildType:   data.buildType   || 'apk',
+        status:      data.status      || 'unknown',
+        progress:    data.progress    || 0,
+        logs:        data.logs        || [],
+        fileUrl:     data.fileUrl     || null,
+        apkUrl:      data.apkUrl      || null,
+        aabUrl:      data.aabUrl      || null,
+        versionName: data.versionName || '1.0.0',
+        aiGenerated: data.aiGenerated || false,
         createdAt:   data.createdAt,
         completedAt: data.completedAt || null
       };
     });
 
+    // Sort in memory by createdAt desc (fallback ke liye bhi kaam karega)
+    builds.sort((a, b) => {
+      const ta = a.createdAt?._seconds || (a.createdAt ? new Date(a.createdAt).getTime()/1000 : 0);
+      const tb = b.createdAt?._seconds || (b.createdAt ? new Date(b.createdAt).getTime()/1000 : 0);
+      return tb - ta;
+    });
+
     res.json({ builds });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch builds' });
+    console.error('user/list error:', err);
+    res.status(500).json({ error: 'Failed to fetch builds', detail: err.message });
   }
 });
 
