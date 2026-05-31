@@ -226,6 +226,7 @@ include ':app'`;
 // ─── Generate GitHub Actions workflow ────────────────────
 // buildType: 'apk' | 'aab'
 // keystoreConfig: { alias, storePassword, keyPassword, cn, org, country }
+// keystoreConfig now also accepts keystoreBase64 (pre-generated, stored in Firestore)
 function generateWorkflow(buildType = 'apk', keystoreConfig = {}) {
   const isAAB = buildType === 'aab';
   const gradleTask   = isAAB ? 'bundleRelease'   : 'assembleRelease';
@@ -235,12 +236,27 @@ function generateWorkflow(buildType = 'apk', keystoreConfig = {}) {
     : 'app/build/outputs/apk/release/app-release.apk';
   const fileExt = isAAB ? 'aab' : 'apk';
 
-  const ksAlias     = (keystoreConfig.alias         || 'release').replace(/'/g, '');
-  const ksStorePass = (keystoreConfig.storePassword || '').replace(/'/g, '');
-  const ksKeyPass   = (keystoreConfig.keyPassword   || '').replace(/'/g, '');
-  const ksCN        = (keystoreConfig.cn            || 'Unknown').replace(/'/g, '');
-  const ksOrg       = (keystoreConfig.org           || 'Unknown').replace(/'/g, '');
-  const ksCountry   = (keystoreConfig.country       || 'IN').replace(/'/g, '');
+  const ksAlias        = (keystoreConfig.alias         || 'release').replace(/'/g, '');
+  const ksStorePass    = (keystoreConfig.storePassword || '').replace(/'/g, '');
+  const ksKeyPass      = (keystoreConfig.keyPassword   || '').replace(/'/g, '');
+  const ksCN           = (keystoreConfig.cn            || 'Unknown').replace(/'/g, '');
+  const ksOrg          = (keystoreConfig.org           || 'Unknown').replace(/'/g, '');
+  const ksCountry      = (keystoreConfig.country       || 'IN').replace(/'/g, '');
+  const keystoreBase64 = keystoreConfig.keystoreBase64 || '';
+
+  // If we have a pre-existing keystore (base64), decode it directly.
+  // Otherwise generate a new one with keytool.
+  const keystoreStep = keystoreBase64
+    ? `      - name: Restore Keystore (existing app — same signature)
+        run: |
+          echo '${keystoreBase64}' | base64 -d > release.keystore
+          echo "Keystore restored from saved copy"
+          ls -lh release.keystore`
+    : `      - name: Generate Keystore (new app)
+        run: |
+          keytool -genkey -v -keystore release.keystore -alias '${ksAlias}' -keyalg RSA -keysize 2048 -validity 10000 -storetype JKS -storepass '${ksStorePass}' -keypass '${ksKeyPass}' -dname "CN=${ksCN}, O=${ksOrg}, L=Unknown, ST=Unknown, C=${ksCountry}"
+          echo "Keystore generated"
+          ls -lh release.keystore`;
 
   return `name: Build Signed ${isAAB ? 'AAB' : 'APK'}
 
@@ -278,11 +294,7 @@ jobs:
           echo "=== gradlew ===" && ls -la gradlew
           echo "=== wrapper dir ===" && ls -la gradle/wrapper/
 
-      - name: Generate Keystore
-        run: |
-          keytool -genkey -v -keystore release.keystore -alias '${ksAlias}' -keyalg RSA -keysize 2048 -validity 10000 -storetype JKS -storepass '${ksStorePass}' -keypass '${ksKeyPass}' -dname "CN=${ksCN}, O=${ksOrg}, L=Unknown, ST=Unknown, C=${ksCountry}"
-          echo "Keystore generated"
-          ls -lh release.keystore
+${keystoreStep}
 
       - name: Build Signed ${isAAB ? 'AAB (App Bundle)' : 'APK'}
         env:
