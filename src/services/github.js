@@ -10,7 +10,7 @@ const ghHeaders = {
   'X-GitHub-Api-Version': '2022-11-28'
 };
 
-// ─── Create temporary build repo ─────────────────────────
+// ─── Create repo ──────────────────────────────────────────
 async function createRepo(repoName) {
   const res = await axios.post(`${GH_API}/user/repos`, {
     name: repoName,
@@ -21,14 +21,46 @@ async function createRepo(repoName) {
   return res.data;
 }
 
-// ─── Push file to repo ────────────────────────────────────
+// ─── Check if repo exists ─────────────────────────────────
+async function repoExists(repoName) {
+  try {
+    await axios.get(
+      `${GH_API}/repos/${GH_OWNER}/${repoName}`,
+      { headers: ghHeaders }
+    );
+    return true;
+  } catch (e) {
+    if (e.response?.status === 404) return false;
+    throw e;
+  }
+}
+
+// ─── Get file SHA (needed to update existing file) ────────
+async function getFileSha(repoName, filePath) {
+  try {
+    const res = await axios.get(
+      `${GH_API}/repos/${GH_OWNER}/${repoName}/contents/${filePath}`,
+      { headers: ghHeaders }
+    );
+    return res.data.sha || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// ─── Push file (create or update) ────────────────────────
 async function pushFile(repoName, filePath, content, message = 'Add file', alreadyBase64 = false) {
   const encoded = alreadyBase64
-    ? content                                      // PNG icons — already base64
-    : Buffer.from(content, 'utf8').toString('base64'); // text files
+    ? content
+    : Buffer.from(content, 'utf8').toString('base64');
+
+  const sha = await getFileSha(repoName, filePath);
+  const body = { message, content: encoded };
+  if (sha) body.sha = sha;
+
   await axios.put(
     `${GH_API}/repos/${GH_OWNER}/${repoName}/contents/${filePath}`,
-    { message, content: encoded },
+    body,
     { headers: ghHeaders }
   );
 }
@@ -40,7 +72,7 @@ async function pushFiles(repoName, files) {
   }
 }
 
-// ─── Trigger GitHub Actions workflow ─────────────────────
+// ─── Trigger workflow ─────────────────────────────────────
 async function triggerWorkflow(repoName, workflowFile = 'build.yml', inputs = {}) {
   await axios.post(
     `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/workflows/${workflowFile}/dispatches`,
@@ -67,28 +99,7 @@ async function getRunStatus(repoName, runId) {
   return res.data;
 }
 
-// ─── Download artifact (APK or AAB) ──────────────────────
-async function downloadArtifact(repoName, runId, artifactName = 'release-apk') {
-  // List artifacts
-  const res = await axios.get(
-    `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/runs/${runId}/artifacts`,
-    { headers: ghHeaders }
-  );
-  const artifacts = res.data.artifacts || [];
-
-  // Find by name, fallback to first artifact
-  const artifact = artifacts.find(a => a.name === artifactName) || artifacts[0];
-  if (!artifact) return null;
-
-  // Download zip
-  const dlRes = await axios.get(
-    `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/artifacts/${artifact.id}/zip`,
-    { headers: ghHeaders, responseType: 'arraybuffer', maxRedirects: 5 }
-  );
-  return dlRes.data;
-}
-
-// ─── Get artifact download URL ────────────────────────────
+// ─── Get artifact info (ID + download URL) ───────────────
 async function getArtifactUrl(repoName, runId, artifactName = 'release-apk') {
   const res = await axios.get(
     `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/runs/${runId}/artifacts`,
@@ -97,16 +108,32 @@ async function getArtifactUrl(repoName, runId, artifactName = 'release-apk') {
   const artifacts = res.data.artifacts || [];
   const artifact = artifacts.find(a => a.name === artifactName) || artifacts[0];
   if (!artifact) return null;
-  // Return the archive_download_url — backend will proxy this to user
   return {
-    artifactId: artifact.id,
+    artifactId:  artifact.id,
     downloadUrl: artifact.archive_download_url,
-    name: artifact.name,
-    expiresAt: artifact.expires_at
+    name:        artifact.name,
+    expiresAt:   artifact.expires_at
   };
 }
 
-// ─── Delete repo (cleanup) ────────────────────────────────
+// ─── Download artifact zip buffer ────────────────────────
+async function downloadArtifact(repoName, runId, artifactName = 'release-apk') {
+  const res = await axios.get(
+    `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/runs/${runId}/artifacts`,
+    { headers: ghHeaders }
+  );
+  const artifacts = res.data.artifacts || [];
+  const artifact = artifacts.find(a => a.name === artifactName) || artifacts[0];
+  if (!artifact) return null;
+
+  const dlRes = await axios.get(
+    `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/artifacts/${artifact.id}/zip`,
+    { headers: ghHeaders, responseType: 'arraybuffer', maxRedirects: 5 }
+  );
+  return dlRes.data;
+}
+
+// ─── Delete repo ──────────────────────────────────────────
 async function deleteRepo(repoName) {
   try {
     await axios.delete(
@@ -121,12 +148,13 @@ async function deleteRepo(repoName) {
 module.exports = {
   createRepo,
   repoExists,
+  getFileSha,
   pushFile,
   pushFiles,
   triggerWorkflow,
   getLatestRun,
   getRunStatus,
-  downloadArtifact,
   getArtifactUrl,
+  downloadArtifact,
   deleteRepo
 };
