@@ -1,0 +1,111 @@
+name: Build Signed APK/AAB
+
+on:
+  workflow_dispatch:
+    inputs:
+      key_alias:
+        description: 'Key Alias'
+        required: true
+        default: 'release'
+      store_password:
+        description: 'Keystore Store Password'
+        required: true
+      key_password:
+        description: 'Key Password'
+        required: true
+      cn:
+        description: 'Certificate Name (CN)'
+        required: false
+        default: 'Unknown'
+      org:
+        description: 'Organization (O)'
+        required: false
+        default: 'Unknown'
+      country:
+        description: 'Country Code (C)'
+        required: false
+        default: 'IN'
+      build_type:
+        description: 'Build type: apk or aab'
+        required: false
+        default: 'apk'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ── Generate JKS Keystore ──────────────────────────────
+      - name: Generate Keystore
+        run: |
+          keytool -genkey -v \
+            -keystore release.keystore \
+            -alias "${{ github.event.inputs.key_alias }}" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storetype JKS \
+            -storepass "${{ github.event.inputs.store_password }}" \
+            -keypass "${{ github.event.inputs.key_password }}" \
+            -dname "CN=${{ github.event.inputs.cn }}, O=${{ github.event.inputs.org }}, L=Unknown, ST=Unknown, C=${{ github.event.inputs.country }}"
+          echo "✅ Keystore generated"
+          ls -lh release.keystore
+
+      # ── Grant Gradle permission ────────────────────────────
+      - name: Grant Gradle Permission
+        run: chmod +x gradlew
+
+      # ── Build APK or AAB ───────────────────────────────────
+      - name: Build Signed APK or AAB
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/release.keystore
+          KEYSTORE_PASSWORD: ${{ github.event.inputs.store_password }}
+          KEY_ALIAS: ${{ github.event.inputs.key_alias }}
+          KEY_PASSWORD: ${{ github.event.inputs.key_password }}
+        run: |
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          if [ "$BUILD_TYPE" = "aab" ]; then
+            echo "Building AAB (App Bundle)..."
+            ./gradlew bundleRelease \
+              -Pandroid.injected.signing.store.file=$KEYSTORE_PATH \
+              -Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD \
+              -Pandroid.injected.signing.key.alias=$KEY_ALIAS \
+              -Pandroid.injected.signing.key.password=$KEY_PASSWORD
+          else
+            echo "Building APK..."
+            ./gradlew assembleRelease \
+              -Pandroid.injected.signing.store.file=$KEYSTORE_PATH \
+              -Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD \
+              -Pandroid.injected.signing.key.alias=$KEY_ALIAS \
+              -Pandroid.injected.signing.key.password=$KEY_PASSWORD
+          fi
+
+      # ── Upload APK artifact ────────────────────────────────
+      - name: Upload APK
+        if: ${{ github.event.inputs.build_type != 'aab' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 1
+
+      # ── Upload AAB artifact ────────────────────────────────
+      - name: Upload AAB
+        if: ${{ github.event.inputs.build_type == 'aab' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-aab
+          path: app/build/outputs/bundle/release/*.aab
+          retention-days: 1
