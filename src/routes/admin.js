@@ -217,6 +217,56 @@ router.delete('/plans/:planId', async (req, res) => {
   }
 });
 
+// ─── GET /api/admin/transactions ──────────────────────────
+router.get('/transactions', async (req, res) => {
+  const db = getDB();
+  try {
+    const snap = await db.collection('transactions')
+      .orderBy('createdAt', 'desc')
+      .limit(100)
+      .get();
+
+    // User info bhi saath laao
+    const txns = await Promise.all(snap.docs.map(async d => {
+      const data = d.data();
+      let userName = '', userEmail = '';
+      try {
+        const uDoc = await db.collection('users').doc(data.uid).get();
+        if (uDoc.exists) {
+          userName  = uDoc.data().name  || uDoc.data().displayName || '';
+          userEmail = uDoc.data().email || '';
+        }
+      } catch(e) {}
+      return { id: d.id, ...data, userName, userEmail };
+    }));
+
+    res.json({ transactions: txns });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+// ─── POST /api/admin/reject-payment ──────────────────────
+router.post('/reject-payment', async (req, res) => {
+  const { txnId, reason } = req.body;
+  if (!txnId) return res.status(400).json({ error: 'txnId required' });
+  const db = getDB();
+  try {
+    const ref = db.collection('transactions').doc(txnId);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Transaction not found' });
+    await ref.update({
+      status: 'rejected',
+      rejectedBy: req.user.uid,
+      rejectedAt: new Date(),
+      rejectReason: reason || 'Rejected by admin'
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to reject payment' });
+  }
+});
+
 // ─── POST /api/admin/approve-payment ─────────────────────
 router.post('/approve-payment', async (req, res) => {
   const { txnId, uid, credits, paidAmount } = req.body;
