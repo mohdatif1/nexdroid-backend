@@ -53,8 +53,22 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
     orientation  = 'portrait',
     permissions  = [],
     buildType    = 'apk',
-    iconBase64   = null
+    iconBase64   = null,
+    keystore     = {}
   } = req.body;
+
+  // Keystore fields with defaults
+  const ksAlias     = (keystore.alias      || 'release').trim();
+  const ksStorePass = (keystore.storePassword || '').trim();
+  const ksKeyPass   = (keystore.keyPassword   || '').trim();
+  const ksCN        = (keystore.cn            || 'Unknown').trim();
+  const ksOrg       = (keystore.org           || 'Unknown').trim();
+  const ksCountry   = (keystore.country       || 'IN').trim().toUpperCase();
+
+  if (!ksStorePass || ksStorePass.length < 6)
+    return res.status(400).json({ error: 'Keystore store password min 6 characters required' });
+  if (!ksKeyPass || ksKeyPass.length < 6)
+    return res.status(400).json({ error: 'Keystore key password min 6 characters required' });
 
   if (!htmlCode || htmlCode.trim().length < 20)
     return res.status(400).json({ error: 'HTML code is required' });
@@ -87,6 +101,7 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
       permissions,
       buildType,
       repoName,
+      keystoreAlias: ksAlias,
       status:   'queued',
       progress: 0,
       logs:     [`Build queued (${buildType.toUpperCase()})...`],
@@ -101,7 +116,8 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
     runBuildPipeline(buildId, repoName, uid, {
       htmlCode, appName, packageName,
       versionCode, versionName, minSdk, orientation, permissions, buildType,
-      iconBase64
+      iconBase64,
+      keystoreConfig: { alias: ksAlias, storePassword: ksStorePass, keyPassword: ksKeyPass, cn: ksCN, org: ksOrg, country: ksCountry }
     }).catch(err => {
       console.error(`[Build ${buildId}] Fatal:`, err.message);
       updateBuildStatus(buildId, 'failed', 0, `Fatal error: ${err.message}`);
@@ -155,7 +171,16 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
 
     await log(`Triggering ${isAAB ? 'AAB' : 'APK'} build on GitHub Actions...`, 40);
     await sleep(5000); // Wait for GitHub to index workflow files
-    await github.triggerWorkflow(repoName, 'build.yml');
+    const { keystoreConfig = {} } = config;
+    await github.triggerWorkflow(repoName, 'build.yml', {
+      key_alias:      keystoreConfig.alias        || 'release',
+      store_password: keystoreConfig.storePassword || '',
+      key_password:   keystoreConfig.keyPassword   || '',
+      cn:             keystoreConfig.cn            || 'Unknown',
+      org:            keystoreConfig.org           || 'Unknown',
+      country:        keystoreConfig.country       || 'IN',
+      build_type:     isAAB ? 'aab' : 'apk'
+    });
 
     await log(`Compiling & signing ${isAAB ? 'App Bundle (AAB)' : 'APK'} — takes ~3-5 min...`, 50);
     const runId = await pollForRun(repoName, buildId, db);
