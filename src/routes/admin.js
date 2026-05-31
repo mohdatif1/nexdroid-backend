@@ -75,6 +75,58 @@ router.post('/add-credits', async (req, res) => {
   }
 });
 
+// ─── POST /api/admin/subtract-credits ─────────────────────
+router.post('/subtract-credits', async (req, res) => {
+  const { uid, amount, reason } = req.body;
+  if (!uid || !amount || amount <= 0)
+    return res.status(400).json({ error: 'Invalid uid or amount' });
+  const db = getDB();
+  try {
+    const ref = db.collection('users').doc(uid);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'User not found' });
+
+    const current = doc.data().credits || 0;
+    const newBal  = Math.max(0, current - amount);
+    await ref.update({ credits: newBal, updatedAt: new Date() });
+    await db.collection('transactions').doc().set({
+      uid, type: 'debit', amount,
+      reason: reason || 'Admin debit',
+      addedBy: req.user.uid,
+      createdAt: new Date()
+    });
+
+    res.json({ success: true, newBalance: newBal });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to subtract credits' });
+  }
+});
+
+// ─── POST /api/admin/set-credits ──────────────────────────
+router.post('/set-credits', async (req, res) => {
+  const { uid, amount, reason } = req.body;
+  if (!uid || typeof amount !== 'number' || amount < 0)
+    return res.status(400).json({ error: 'Invalid uid or amount' });
+  const db = getDB();
+  try {
+    const ref = db.collection('users').doc(uid);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'User not found' });
+
+    await ref.update({ credits: amount, updatedAt: new Date() });
+    await db.collection('transactions').doc().set({
+      uid, type: 'set', amount,
+      reason: reason || 'Admin set credits',
+      addedBy: req.user.uid,
+      createdAt: new Date()
+    });
+
+    res.json({ success: true, newBalance: amount });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to set credits' });
+  }
+});
+
 // ─── GET /api/admin/builds ────────────────────────────────
 router.get('/builds', async (req, res) => {
   const db = getDB();
