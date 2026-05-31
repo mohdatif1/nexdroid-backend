@@ -21,48 +21,14 @@ async function createRepo(repoName) {
   return res.data;
 }
 
-// ─── Check if repo exists ─────────────────────────────────
-async function repoExists(repoName) {
-  try {
-    await axios.get(
-      `${GH_API}/repos/${GH_OWNER}/${repoName}`,
-      { headers: ghHeaders }
-    );
-    return true;
-  } catch (e) {
-    if (e.response?.status === 404) return false;
-    throw e;
-  }
-}
-
-// ─── Get file SHA (needed to update existing file) ────────
-async function getFileSha(repoName, filePath) {
-  try {
-    const res = await axios.get(
-      `${GH_API}/repos/${GH_OWNER}/${repoName}/contents/${filePath}`,
-      { headers: ghHeaders }
-    );
-    return res.data.sha || null;
-  } catch (e) {
-    return null; // file doesn't exist yet
-  }
-}
-
-// ─── Push file to repo (create or update) ─────────────────
+// ─── Push file to repo ────────────────────────────────────
 async function pushFile(repoName, filePath, content, message = 'Add file', alreadyBase64 = false) {
   const encoded = alreadyBase64
-    ? content
-    : Buffer.from(content, 'utf8').toString('base64');
-
-  // Get SHA if file exists (required for update)
-  const sha = await getFileSha(repoName, filePath);
-
-  const body = { message, content: encoded };
-  if (sha) body.sha = sha; // include sha to update existing file
-
+    ? content                                      // PNG icons — already base64
+    : Buffer.from(content, 'utf8').toString('base64'); // text files
   await axios.put(
     `${GH_API}/repos/${GH_OWNER}/${repoName}/contents/${filePath}`,
-    body,
+    { message, content: encoded },
     { headers: ghHeaders }
   );
 }
@@ -122,6 +88,24 @@ async function downloadArtifact(repoName, runId, artifactName = 'release-apk') {
   return dlRes.data;
 }
 
+// ─── Get artifact download URL ────────────────────────────
+async function getArtifactUrl(repoName, runId, artifactName = 'release-apk') {
+  const res = await axios.get(
+    `${GH_API}/repos/${GH_OWNER}/${repoName}/actions/runs/${runId}/artifacts`,
+    { headers: ghHeaders }
+  );
+  const artifacts = res.data.artifacts || [];
+  const artifact = artifacts.find(a => a.name === artifactName) || artifacts[0];
+  if (!artifact) return null;
+  // Return the archive_download_url — backend will proxy this to user
+  return {
+    artifactId: artifact.id,
+    downloadUrl: artifact.archive_download_url,
+    name: artifact.name,
+    expiresAt: artifact.expires_at
+  };
+}
+
 // ─── Delete repo (cleanup) ────────────────────────────────
 async function deleteRepo(repoName) {
   try {
@@ -143,5 +127,6 @@ module.exports = {
   getLatestRun,
   getRunStatus,
   downloadArtifact,
+  getArtifactUrl,
   deleteRepo
 };
