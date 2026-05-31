@@ -134,6 +134,69 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
 });
 
 // ─── BUILD PIPELINE (async) ───────────────────────────────
+// ─── KEYSTORE: GET EXISTING OR CREATE NEW ─────────────────
+// packageName ko key banao — same app ka har build same keystore use karega
+async function getOrCreateKeystore(packageName, ksParams) {
+  const db = getDB();
+  const ksRef = db.collection('keystores').doc(packageName);
+  const ksDoc = await ksRef.get();
+
+  if (ksDoc.exists) {
+    // Existing keystore mili — wahi return karo
+    const d = ksDoc.data();
+    console.log(`[Keystore] Reusing existing keystore for ${packageName}`);
+    return {
+      keystoreBase64: d.keystoreBase64,
+      alias:          d.alias,
+      storePassword:  d.storePassword,
+      keyPassword:    d.keyPassword,
+      isNew:          false
+    };
+  }
+
+  // Nayi keystore generate karo (Node.js mein, via child_process)
+  console.log(`[Keystore] Generating new keystore for ${packageName}`);
+  const { execSync } = require('child_process');
+  const fs   = require('fs');
+  const path = require('path');
+  const tmpPath = path.join('/tmp', `ks_${packageName.replace(/\./g,'-')}_${Date.now()}.jks`);
+
+  execSync(
+    `keytool -genkey -v \
+      -keystore "${tmpPath}" \
+      -alias "${ksParams.alias}" \
+      -keyalg RSA -keysize 2048 \
+      -validity 10000 \
+      -storetype JKS \
+      -storepass "${ksParams.storePassword}" \
+      -keypass "${ksParams.keyPassword}" \
+      -dname "CN=${ksParams.cn}, O=${ksParams.org}, L=Unknown, ST=Unknown, C=${ksParams.country}"`,
+    { stdio: 'pipe' }
+  );
+
+  const keystoreBase64 = fs.readFileSync(tmpPath).toString('base64');
+  fs.unlinkSync(tmpPath); // temp file delete karo
+
+  // Firestore mein save karo — permanently
+  await ksRef.set({
+    keystoreBase64,
+    alias:         ksParams.alias,
+    storePassword: ksParams.storePassword,
+    keyPassword:   ksParams.keyPassword,
+    packageName,
+    createdAt:     new Date()
+  });
+
+  console.log(`[Keystore] New keystore saved for ${packageName}`);
+  return {
+    keystoreBase64,
+    alias:         ksParams.alias,
+    storePassword: ksParams.storePassword,
+    keyPassword:   ksParams.keyPassword,
+    isNew:         true
+  };
+}
+
 async function runBuildPipeline(buildId, repoName, uid, config) {
   const db    = getDB();
   const isAAB = config.buildType === 'aab';
@@ -163,8 +226,28 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
       await github.createRepo(repoName);
     }
 
+    await log('Setting up keystore...', 12);
+    const ksResult = await getOrCreateKeystore(config.packageName, config.keystoreConfig);
+    if (ksResult.isNew) {
+      await log('New keystore generated & saved permanently', 14);
+    } else {
+      await log('Existing keystore loaded — app signature preserved ✓', 14);
+    }
+
+    // keystoreConfig mein base64 inject karo — workflow mein decode hoga
+    const keystoreConfigWithBase64 = {
+      ...config.keystoreConfig,
+      keystoreBase64:  ksResult.keystoreBase64,
+      alias:           ksResult.alias,
+      storePassword:   ksResult.storePassword,
+      keyPassword:     ksResult.keyPassword,
+    };
+
     await log('Generating Android project files...', 15);
-    const files = generateProjectFiles(config, config.htmlCode);
+    const files = generateProjectFiles(
+      { ...config, keystoreConfig: keystoreConfigWithBase64 },
+      config.htmlCode
+    );
 
     const filesForGithub = files.map(f => ({
       path: f.path,
