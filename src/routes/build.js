@@ -82,7 +82,9 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
     return res.status(400).json({ error: 'buildType must be apk or aab' });
 
   const buildId  = uuidv4();
-  const repoName = `nexdroid-${buildId.split('-')[0]}`;
+  // Repo name based on packageName so same app reuses same repo & keystore
+  const safePkg  = packageName.replace(/\./g, '-').toLowerCase();
+  const repoName = `nexdroid-${safePkg}`;
   const uid      = req.user.uid;
   const isAAB    = buildType === 'aab';
 
@@ -153,13 +155,17 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
 
   try {
     await log('Creating build repository...', 5);
-    await github.createRepo(repoName);
+    const exists = await github.repoExists(repoName);
+    if (exists) {
+      console.log(`[Build ${buildId}] Repo ${repoName} already exists — reusing for keystore continuity`);
+      await log('Reusing existing repo (same keystore will be used)...', 5);
+    } else {
+      await github.createRepo(repoName);
+    }
 
     await log('Generating Android project files...', 15);
     const files = generateProjectFiles(config, config.htmlCode);
 
-    // Fix encoding: PNG icon files are already base64, text files are not.
-    // github.pushFile handles encoding based on alreadyBase64 flag.
     const filesForGithub = files.map(f => ({
       path: f.path,
       content: f.content,
@@ -170,17 +176,8 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
     await github.pushFiles(repoName, filesForGithub);
 
     await log(`Triggering ${isAAB ? 'AAB' : 'APK'} build on GitHub Actions...`, 40);
-    await sleep(5000); // Wait for GitHub to index workflow files
-    const { keystoreConfig = {} } = config;
-    await github.triggerWorkflow(repoName, 'build.yml', {
-      key_alias:      keystoreConfig.alias        || 'release',
-      store_password: keystoreConfig.storePassword || '',
-      key_password:   keystoreConfig.keyPassword   || '',
-      cn:             keystoreConfig.cn            || 'Unknown',
-      org:            keystoreConfig.org           || 'Unknown',
-      country:        keystoreConfig.country       || 'IN',
-      build_type:     isAAB ? 'aab' : 'apk'
-    });
+    await sleep(5000);
+    await github.triggerWorkflow(repoName, 'build.yml');
 
     await log(`Compiling & signing ${isAAB ? 'App Bundle (AAB)' : 'APK'} — takes ~3-5 min...`, 50);
     const runId = await pollForRun(repoName, buildId, db);
@@ -218,9 +215,8 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
       status:    'failed',
       updatedAt: new Date()
     });
-  } finally {
-    setTimeout(() => github.deleteRepo(repoName), 10000);
   }
+  // Note: repo is NOT deleted — same repo reused for future builds of same app (keystore continuity)
 }
 
 // ─── Poll GitHub Actions for run completion ───────────────
