@@ -21,14 +21,48 @@ async function createRepo(repoName) {
   return res.data;
 }
 
-// ─── Push file to repo ────────────────────────────────────
+// ─── Check if repo exists ─────────────────────────────────
+async function repoExists(repoName) {
+  try {
+    await axios.get(
+      `${GH_API}/repos/${GH_OWNER}/${repoName}`,
+      { headers: ghHeaders }
+    );
+    return true;
+  } catch (e) {
+    if (e.response?.status === 404) return false;
+    throw e;
+  }
+}
+
+// ─── Get file SHA (needed to update existing file) ────────
+async function getFileSha(repoName, filePath) {
+  try {
+    const res = await axios.get(
+      `${GH_API}/repos/${GH_OWNER}/${repoName}/contents/${filePath}`,
+      { headers: ghHeaders }
+    );
+    return res.data.sha || null;
+  } catch (e) {
+    return null; // file doesn't exist yet
+  }
+}
+
+// ─── Push file to repo (create or update) ─────────────────
 async function pushFile(repoName, filePath, content, message = 'Add file', alreadyBase64 = false) {
   const encoded = alreadyBase64
-    ? content                                      // PNG icons — already base64
-    : Buffer.from(content, 'utf8').toString('base64'); // text files
+    ? content
+    : Buffer.from(content, 'utf8').toString('base64');
+
+  // Get SHA if file exists (required for update)
+  const sha = await getFileSha(repoName, filePath);
+
+  const body = { message, content: encoded };
+  if (sha) body.sha = sha; // include sha to update existing file
+
   await axios.put(
     `${GH_API}/repos/${GH_OWNER}/${repoName}/contents/${filePath}`,
-    { message, content: encoded },
+    body,
     { headers: ghHeaders }
   );
 }
@@ -102,6 +136,7 @@ async function deleteRepo(repoName) {
 
 module.exports = {
   createRepo,
+  repoExists,
   pushFile,
   pushFiles,
   triggerWorkflow,
