@@ -280,16 +280,7 @@ jobs:
 
       - name: Generate Keystore
         run: |
-          keytool -genkey -v \\\\
-            -keystore release.keystore \\\\
-            -alias '${ksAlias}' \\\\
-            -keyalg RSA \\\\
-            -keysize 2048 \\\\
-            -validity 10000 \\\\
-            -storetype JKS \\\\
-            -storepass '${ksStorePass}' \\\\
-            -keypass '${ksKeyPass}' \\\\
-            -dname "CN=${ksCN}, O=${ksOrg}, L=Unknown, ST=Unknown, C=${ksCountry}"
+          keytool -genkey -v -keystore release.keystore -alias '${ksAlias}' -keyalg RSA -keysize 2048 -validity 10000 -storetype JKS -storepass '${ksStorePass}' -keypass '${ksKeyPass}' -dname "CN=${ksCN}, O=${ksOrg}, L=Unknown, ST=Unknown, C=${ksCountry}"
           echo "Keystore generated"
           ls -lh release.keystore
 
