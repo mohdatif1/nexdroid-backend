@@ -251,19 +251,25 @@ function generateWorkflow(buildType = 'apk', keystoreConfig = {}) {
   const ksCountry      = (keystoreConfig.country       || 'IN').replace(/'/g, '');
   const keystoreBase64 = keystoreConfig.keystoreBase64 || '';
 
-  // If we have a pre-existing keystore (base64), decode it directly.
-  // Otherwise generate a new one with keytool.
+  // Existing keystore: restore from base64 | New app: generate + upload as artifact
   const keystoreStep = keystoreBase64
-    ? `      - name: Restore Keystore (existing app — same signature)
+    ? `      - name: Restore Keystore
         run: |
           echo '${keystoreBase64}' | base64 -d > release.keystore
           echo "Keystore restored from saved copy"
           ls -lh release.keystore`
-    : `      - name: Generate Keystore (new app)
+    : `      - name: Generate Keystore
         run: |
           keytool -genkey -v -keystore release.keystore -alias '${ksAlias}' -keyalg RSA -keysize 2048 -validity 10000 -storetype JKS -storepass '${ksStorePass}' -keypass '${ksKeyPass}' -dname "CN=${ksCN}, O=${ksOrg}, L=Unknown, ST=Unknown, C=${ksCountry}"
           echo "Keystore generated"
-          ls -lh release.keystore`;
+          ls -lh release.keystore
+
+      - name: Upload Keystore Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-keystore
+          path: release.keystore
+          retention-days: 30`;
 
   return `name: Build Signed ${isAAB ? 'AAB' : 'APK'}
 
