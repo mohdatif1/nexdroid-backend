@@ -274,6 +274,8 @@ function generateRootGradle() {
     repositories {
         google()
         mavenCentral()
+        maven { url 'https://maven.google.com' }
+        maven { url 'https://jitpack.io' }
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:8.2.2'
@@ -284,6 +286,8 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        maven { url 'https://maven.google.com' }
+        maven { url 'https://jitpack.io' }
     }
 }`;
 }
@@ -302,7 +306,12 @@ android.useAndroidX=true
 android.enableJetifier=true
 org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
 org.gradle.parallel=true
-org.gradle.caching=true`;
+org.gradle.caching=true
+org.gradle.daemon=false
+systemProp.http.connectionTimeout=120000
+systemProp.http.socketTimeout=120000
+systemProp.https.connectionTimeout=120000
+systemProp.https.socketTimeout=120000`;
 }
 
 function generateSettingsGradle(appName) {
@@ -387,6 +396,17 @@ jobs:
           echo "=== gradlew ===" && ls -la gradlew
           echo "=== wrapper dir ===" && ls -la gradle/wrapper/
 
+      - name: Configure Gradle network settings
+        run: |
+          mkdir -p ~/.gradle
+          cat >> ~/.gradle/gradle.properties << 'EOF'
+          systemProp.http.connectionTimeout=120000
+          systemProp.http.socketTimeout=120000
+          systemProp.https.connectionTimeout=120000
+          systemProp.https.socketTimeout=120000
+          org.gradle.daemon=false
+          EOF
+
 ${keystoreStep}
 
       - name: Build Signed ${isAAB ? 'AAB (App Bundle)' : 'APK'}
@@ -396,7 +416,8 @@ ${keystoreStep}
           KEY_ALIAS: '${ksAlias}'
           KEY_PASSWORD: '${ksKeyPass}'
         run: |
-          ./gradlew ${gradleTask} --no-daemon --stacktrace
+          ./gradlew ${gradleTask} --no-daemon --stacktrace --max-workers=2 \
+            || (echo "Retrying build..." && sleep 15 && ./gradlew ${gradleTask} --no-daemon --stacktrace --max-workers=2)
           echo "Build completed successfully"
 
       - name: Verify output file
