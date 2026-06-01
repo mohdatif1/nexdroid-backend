@@ -47,15 +47,21 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
     htmlCode,
     appName,
     packageName,
-    versionCode = 1,
-    versionName  = '1.0.0',
-    minSdk       = '23',
-    orientation  = 'portrait',
-    permissions  = [],
-    buildType    = 'apk',
-    iconBase64   = null,
-    keystore     = {}
+    versionCode        = 1,
+    versionName        = '1.0.0',
+    minSdk             = '23',
+    targetSdk          = '34',
+    orientation        = 'portrait',
+    permissions        = [],
+    customPermissions  = [],
+    buildType          = 'apk',
+    iconBase64         = null,
+    keystore           = {},
+    admob              = null
   } = req.body;
+
+  // Merge permissions + customPermissions (deduplicate)
+  const allPermissions = [...new Set([...permissions, ...customPermissions])];
 
   // Keystore fields with defaults
   const ksAlias     = (keystore.alias      || 'release').trim();
@@ -94,16 +100,18 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
     await db.collection('builds').doc(buildId).set({
       buildId,
       uid,
-      appName:     appName.trim(),
+      appName:          appName.trim(),
       packageName,
       versionCode,
       versionName,
       minSdk,
+      targetSdk,
       orientation,
-      permissions,
+      permissions:      allPermissions,
       buildType,
       repoName,
-      keystoreAlias: ksAlias,
+      keystoreAlias:    ksAlias,
+      admobEnabled:     !!(admob && admob.enabled),
       status:   'queued',
       progress: 0,
       logs:     [`Build queued (${buildType.toUpperCase()})...`],
@@ -117,8 +125,9 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
 
     runBuildPipeline(buildId, repoName, uid, {
       htmlCode, appName, packageName,
-      versionCode, versionName, minSdk, orientation, permissions, buildType,
-      iconBase64,
+      versionCode, versionName, minSdk, targetSdk,
+      orientation, permissions: allPermissions, buildType,
+      iconBase64, admob,
       keystoreConfig: { alias: ksAlias, storePassword: ksStorePass, keyPassword: ksKeyPass, cn: ksCN, org: ksOrg, country: ksCountry }
     }).catch(err => {
       console.error(`[Build ${buildId}] Fatal:`, err.message);
