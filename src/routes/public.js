@@ -22,15 +22,30 @@ router.get('/plans', async (req, res) => {
 });
 
 // ─── GET /api/public/settings ─────────────────────────────
-// UPI ID + QR Image URL (no auth needed)
+// Returns: payment config + AI master prompt + safety rules
+// No auth needed — frontend loads this on app start
 router.get('/settings', async (req, res) => {
   const db = getDB();
   try {
-    const doc = await db.collection('settings').doc('payment').get();
-    const data = doc.exists ? doc.data() : {};
+    const [payDoc, aiDoc] = await Promise.all([
+      db.collection('settings').doc('payment').get(),
+      db.collection('settings').doc('ai').get()
+    ]);
+    const pay = payDoc.exists ? payDoc.data() : {};
+    const ai  = aiDoc.exists  ? aiDoc.data()  : {};
     res.json({
-      upiId:      data.upiId      || '',
-      qrImageUrl: data.qrImageUrl || ''
+      // Payment
+      upiId:             pay.upiId             || '',
+      qrImageUrl:        pay.qrImageUrl        || '',
+      // AI Prompt
+      masterPrompt:      ai.masterPrompt       || '',
+      safetyPrompt:      ai.safetyPrompt       || '',
+      // Safety Rules
+      blockedKeywords:   ai.blockedKeywords    || [],
+      blockedCategories: ai.blockedCategories  || [],
+      violationAction:   ai.violationAction    || 'block',
+      // Admin emails (for frontend admin nav visibility)
+      adminEmails:       ai.adminEmails        || []
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch settings' });
