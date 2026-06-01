@@ -298,29 +298,89 @@ router.post('/approve-payment', async (req, res) => {
 router.get('/settings', async (req, res) => {
   const db = getDB();
   try {
-    const doc = await db.collection('settings').doc('payment').get();
-    const data = doc.exists ? doc.data() : {};
-    res.json({ upiId: data.upiId || '', qrImageUrl: data.qrImageUrl || '' });
+    const [payDoc, aiDoc] = await Promise.all([
+      db.collection('settings').doc('payment').get(),
+      db.collection('settings').doc('ai').get()
+    ]);
+    const pay = payDoc.exists ? payDoc.data() : {};
+    const ai  = aiDoc.exists  ? aiDoc.data()  : {};
+    res.json({
+      upiId:             pay.upiId             || '',
+      qrImageUrl:        pay.qrImageUrl        || '',
+      masterPrompt:      ai.masterPrompt       || '',
+      safetyPrompt:      ai.safetyPrompt       || '',
+      blockedKeywords:   ai.blockedKeywords    || [],
+      blockedCategories: ai.blockedCategories  || [],
+      violationAction:   ai.violationAction    || 'block',
+      adminEmails:       ai.adminEmails        || []
+    });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch settings' });
   }
 });
 
-// ─── PUT /api/admin/settings ──────────────────────────────
-router.put('/settings', async (req, res) => {
-  const { upiId, qrImageUrl } = req.body;
-  if (!upiId && !qrImageUrl) {
-    return res.status(400).json({ error: 'upiId or qrImageUrl required' });
-  }
+// ─── PUT/POST /api/admin/settings ─────────────────────────
+// Handles both payment settings AND AI/safety settings
+async function handleSaveSettings(req, res) {
+  const {
+    upiId, qrImageUrl,
+    masterPrompt, safetyPrompt,
+    blockedKeywords, blockedCategories,
+    violationAction, adminEmails
+  } = req.body;
+
   const db = getDB();
   try {
-    const update = { updatedAt: new Date(), updatedBy: req.user.uid };
-    if (upiId !== undefined)      update.upiId      = upiId;
-    if (qrImageUrl !== undefined) update.qrImageUrl = qrImageUrl;
-    await db.collection('settings').doc('payment').set(update, { merge: true });
+    const batch = db.batch();
+
+    // Payment settings
+    const payUpdate = { updatedAt: new Date(), updatedBy: req.user.uid };
+    if (upiId        !== undefined) payUpdate.upiId        = upiId;
+    if (qrImageUrl   !== undefined) payUpdate.qrImageUrl   = qrImageUrl;
+    if (Object.keys(payUpdate).length > 2) {
+      batch.set(db.collection('settings').doc('payment'), payUpdate, { merge: true });
+    }
+
+    // AI / Safety settings
+    const aiUpdate = { updatedAt: new Date(), updatedBy: req.user.uid };
+    if (masterPrompt      !== undefined) aiUpdate.masterPrompt      = masterPrompt;
+    if (safetyPrompt      !== undefined) aiUpdate.safetyPrompt      = safetyPrompt;
+    if (blockedKeywords   !== undefined) aiUpdate.blockedKeywords   = blockedKeywords;
+    if (blockedCategories !== undefined) aiUpdate.blockedCategories = blockedCategories;
+    if (violationAction   !== undefined) aiUpdate.violationAction   = violationAction;
+    if (adminEmails       !== undefined) aiUpdate.adminEmails       = adminEmails;
+    if (Object.keys(aiUpdate).length > 2) {
+      batch.set(db.collection('settings').doc('ai'), aiUpdate, { merge: true });
+    }
+
+    await batch.commit();
     res.json({ success: true });
   } catch (err) {
+    console.error('[Settings Save]', err.message);
     res.status(500).json({ error: 'Failed to update settings' });
+  }
+}
+
+router.put('/settings',  handleSaveSettings);
+router.post('/settings', handleSaveSettings);
+
+// ─── POST /api/admin/log-violation ────────────────────────
+router.post('/log-violation', async (req, res) => {
+  const { userId, input, reason, ts } = req.body;
+  const db = getDB();
+  try {
+    await db.collection('violations').add({
+      userId:    userId    || req.user.uid,
+      input:     input     || '',
+      reason:    reason    || '',
+      ts:        ts        || Date.now(),
+      reportedBy: req.user.uid,
+      createdAt: new Date()
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Log Violation]', err.message);
+    res.status(500).json({ error: 'Failed to log violation' });
   }
 });
 
