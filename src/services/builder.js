@@ -23,6 +23,11 @@ function generateAndroidManifest(appName, packageName, versionCode, versionName,
         android:targetSdkVersion="${targetSdk}" />
 
 ${permLines ? permLines + '\n' : ''}
+    <!-- Download ke liye required permissions -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -48,6 +53,17 @@ ${permLines ? permLines + '\n' : ''}
             </intent-filter>
 
         </activity>
+
+        <!-- FileProvider — Android 10+ pe downloads ke liye -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${packageName}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 
@@ -103,12 +119,20 @@ dependencies {
 function generateMainActivity(packageName) {
   return `package ${packageName};
 
+import android.app.DownloadManager;
+import android.content.Context;
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
+import android.webkit.CookieManager;
+import android.webkit.MimeTypeMap;
+import android.webkit.PermissionRequest;
+import android.webkit.URLUtil;
+import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.webkit.WebChromeClient;
-import android.webkit.PermissionRequest;
+import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 
 public class MainActivity extends AppCompatActivity {
@@ -128,12 +152,68 @@ public class MainActivity extends AppCompatActivity {
         settings.setAllowFileAccess(true);
         settings.setGeolocationEnabled(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        settings.setUserAgentString(settings.getUserAgentString());
 
         webView.setWebViewClient(new WebViewClient());
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onPermissionRequest(PermissionRequest request) {
                 request.grant(request.getResources());
+            }
+        });
+
+        // ── Download Listener — har type ki file support ──────────────────
+        webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
+            try {
+                // File name nikalo — original extension preserve karo
+                String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
+
+                // Agar extension nahi mili toh mimeType se dhundho
+                if (!fileName.contains(".")) {
+                    String ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType);
+                    if (ext != null && !ext.isEmpty()) {
+                        fileName = fileName + "." + ext;
+                    }
+                }
+
+                DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
+                request.setMimeType(mimeType);
+
+                // Cookies add karo (authenticated downloads ke liye)
+                String cookies = CookieManager.getInstance().getCookie(url);
+                if (cookies != null) {
+                    request.addRequestHeader("cookie", cookies);
+                }
+                request.addRequestHeader("User-Agent", userAgent);
+
+                request.setDescription("Downloading file...");
+                request.setTitle(fileName);
+
+                // Downloads folder mein save karo (file manager mein dikhega)
+                request.setDestinationInExternalPublicDir(
+                    Environment.DIRECTORY_DOWNLOADS, fileName
+                );
+
+                // Download complete hone pe notification dikhao
+                request.setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                );
+
+                DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+                dm.enqueue(request);
+
+                Toast.makeText(
+                    getApplicationContext(),
+                    "Downloading: " + fileName,
+                    Toast.LENGTH_SHORT
+                ).show();
+
+            } catch (Exception e) {
+                Toast.makeText(
+                    getApplicationContext(),
+                    "Download failed: " + e.getMessage(),
+                    Toast.LENGTH_LONG
+                ).show();
             }
         });
 
@@ -504,6 +584,12 @@ function generateProjectFiles(config, htmlCode) {
       content: generateNetworkSecurityConfig()
     },
 
+    // FileProvider paths — downloads ke liye
+    {
+      path: 'app/src/main/res/xml/file_paths.xml',
+      content: generateFilePaths()
+    },
+
     // App theme
     {
       path: 'app/src/main/res/values/styles.xml',
@@ -528,4 +614,16 @@ function _defaultIconBase64() {
   return 'iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAQUlEQVR4nO3OQQ0AIAwAsfnCG9bBBcejSQV01j5fmXwgJCQkVA+EhISE6oGQkJBQPRASEhKqB0JCQkL1QEhI6LELyaR44svvHicAAAAASUVORK5CYII=';
 }
 
-module.exports = { generateProjectFiles, generateWorkflow, injectAdmob };
+function generateFilePaths() {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Downloads folder — har type ki file yahan save hogi -->
+    <external-path name="downloads" path="Download/" />
+    <external-files-path name="external_files" path="." />
+    <files-path name="files" path="." />
+    <cache-path name="cache" path="." />
+    <external-cache-path name="external_cache" path="." />
+</paths>`;
+}
+
+module.exports = { generateProjectFiles, generateWorkflow, injectAdmob, generateFilePaths };
