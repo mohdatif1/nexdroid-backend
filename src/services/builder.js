@@ -1,9 +1,15 @@
 // Generates all files needed for a Capacitor Android build
 // Supports both APK (assembleRelease) and AAB (bundleRelease)
 
-function generateAndroidManifest(appName, packageName, versionCode, versionName, minSdk, orientation, permissions) {
-  const permLines = permissions
-    .map(p => `    <uses-permission android:name="android.permission.${p}" />`)
+function generateAndroidManifest(appName, packageName, versionCode, versionName, minSdk, orientation, permissions, targetSdk = '34') {
+  // Deduplicate permissions
+  const uniquePerms = [...new Set(permissions)];
+  const permLines = uniquePerms
+    .map(p => {
+      // Support full permission name (android.permission.X) or short (X)
+      const fullPerm = p.includes('.') ? p : `android.permission.${p}`;
+      return `    <uses-permission android:name="${fullPerm}" />`;
+    })
     .join('\n');
 
   return `<?xml version="1.0" encoding="utf-8"?>
@@ -14,7 +20,7 @@ function generateAndroidManifest(appName, packageName, versionCode, versionName,
 
     <uses-sdk
         android:minSdkVersion="${minSdk}"
-        android:targetSdkVersion="34" />
+        android:targetSdkVersion="${targetSdk}" />
 
 ${permLines ? permLines + '\n' : ''}
     <application
@@ -48,16 +54,17 @@ ${permLines ? permLines + '\n' : ''}
 </manifest>`;
 }
 
-function generateBuildGradle(packageName, versionCode, versionName, minSdk) {
+function generateBuildGradle(packageName, versionCode, versionName, minSdk, targetSdk = '34') {
+  const compileSdk = Math.max(parseInt(targetSdk) || 34, 34);
   return `apply plugin: 'com.android.application'
 
 android {
     namespace "${packageName}"
-    compileSdkVersion 34
+    compileSdkVersion ${compileSdk}
     defaultConfig {
         applicationId "${packageName}"
         minSdkVersion ${minSdk}
-        targetSdkVersion 34
+        targetSdkVersion ${parseInt(targetSdk) || 34}
         versionCode ${versionCode}
         versionName "${versionName}"
     }
@@ -362,32 +369,103 @@ function generateIconFiles(iconBase64) {
   return files;
 }
 
+
+// ─── AdMob Injection ─────────────────────────────────────
+// Injects AdMob SDK + ad unit into the HTML content
+function injectAdmob(htmlCode, admob) {
+  if (!admob || !admob.enabled || !admob.appId) return htmlCode;
+
+  const position  = admob.position  || 'bottom';
+  const bannerId  = admob.bannerId  || '';
+  const interId   = admob.interId   || '';
+
+  // AdMob meta tag for app ID
+  const metaTag = `<meta name="admob-app-id" content="${admob.appId}">`;
+
+  // Banner ad HTML
+  const bannerStyle = position === 'top'
+    ? 'position:fixed;top:0;left:0;width:100%;z-index:9999;'
+    : 'position:fixed;bottom:0;left:0;width:100%;z-index:9999;';
+
+  const bannerHtml = bannerId ? `
+  <!-- AdMob Banner Ad -->
+  <div id="admob-banner" style="${bannerStyle}background:#f1f1f1;min-height:50px;display:flex;align-items:center;justify-content:center;">
+    <ins class="adsbygoogle"
+      style="display:inline-block;width:320px;height:50px"
+      data-ad-client="${admob.appId}"
+      data-ad-slot="${bannerId.split('/').pop()}"></ins>
+  </div>` : '';
+
+  // Body padding so content is not hidden behind banner
+  const bodyPadding = position === 'top'
+    ? 'body { padding-top: 60px !important; }'
+    : 'body { padding-bottom: 60px !important; }';
+
+  // Interstitial JS
+  const interJs = interId ? `
+  <script>
+    // AdMob Interstitial
+    var admobInterstitialId = '${interId}';
+    var admobInterCount = 0;
+    function checkAdmobInter() {
+      admobInterCount++;
+      if (admobInterCount % 5 === 0 && window.admob) {
+        try { window.admob.showInterstitial(); } catch(e) {}
+      }
+    }
+    document.addEventListener('click', checkAdmobInter);
+  </script>` : '';
+
+  // Inject into HTML
+  let result = htmlCode;
+
+  // Add meta tag in <head>
+  result = result.replace(/<head>/i, `<head>
+  ${metaTag}`);
+
+  // Add body padding style
+  result = result.replace(/<\/head>/i, `  <style>${bodyPadding}</style>
+</head>`);
+
+  // Add banner before </body>
+  result = result.replace(/<\/body>/i, `${bannerHtml}${interJs}
+</body>`);
+
+  return result;
+}
+
 // ─── Build full project file list ────────────────────────
 function generateProjectFiles(config, htmlCode) {
   const {
     appName, packageName, versionCode, versionName,
-    minSdk, orientation, permissions,
-    buildType = 'apk',   // 'apk' | 'aab'
-    iconBase64 = null,   // base64 PNG string for app icon
-    keystoreConfig = {}, // { alias, storePassword, keyPassword, cn, org, country }
+    minSdk      = '23',
+    targetSdk   = '34',
+    orientation, permissions,
+    buildType   = 'apk',
+    iconBase64  = null,
+    keystoreConfig = {},
+    admob       = null,
   } = config;
 
   const pkgPath = packageName.replace(/\./g, '/');
 
+  // Inject AdMob into HTML if configured
+  const finalHtmlCode = admob && admob.enabled ? injectAdmob(htmlCode, admob) : htmlCode;
+
   return [
-    // HTML app source
-    { path: 'app/src/main/assets/www/index.html', content: htmlCode },
+    // HTML app source (with optional AdMob injection)
+    { path: 'app/src/main/assets/www/index.html', content: finalHtmlCode },
 
     // AndroidManifest
     {
       path: 'app/src/main/AndroidManifest.xml',
-      content: generateAndroidManifest(appName, packageName, versionCode, versionName, minSdk, orientation, permissions)
+      content: generateAndroidManifest(appName, packageName, versionCode, versionName, minSdk, orientation, permissions, targetSdk)
     },
 
     // app/build.gradle
     {
       path: 'app/build.gradle',
-      content: generateBuildGradle(packageName, versionCode, versionName, minSdk)
+      content: generateBuildGradle(packageName, versionCode, versionName, minSdk, targetSdk)
     },
 
     // Root build.gradle
@@ -444,4 +522,4 @@ function _defaultIconBase64() {
   return 'iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAQUlEQVR4nO3OQQ0AIAwAsfnCG9bBBcejSQV01j5fmXwgJCQkVA+EhISE6oGQkJBQPRASEhKqB0JCQkL1QEhI6LELyaR44svvHicAAAAASUVORK5CYII=';
 }
 
-module.exports = { generateProjectFiles, generateWorkflow };
+module.exports = { generateProjectFiles, generateWorkflow, injectAdmob };
