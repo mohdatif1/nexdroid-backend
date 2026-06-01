@@ -133,6 +133,22 @@ async function downloadArtifact(repoName, runId, artifactName = 'release-apk') {
   return dlRes.data;
 }
 
+// ─── Get file content from repo (base64 encoded) ─────────
+// Keystore save karne ke liye use hota hai after first build
+async function getFileContent(repoName, filePath) {
+  try {
+    const res = await axios.get(
+      `${GH_API}/repos/${GH_OWNER}/${repoName}/contents/${filePath}`,
+      { headers: ghHeaders }
+    );
+    // GitHub API content base64 mein deta hai (newlines ke saath) — clean karke return karo
+    return res.data.content.replace(/\n/g, '');
+  } catch (e) {
+    console.warn(`[GitHub] getFileContent failed for ${filePath}:`, e.message);
+    return null;
+  }
+}
+
 // ─── Delete repo ──────────────────────────────────────────
 async function deleteRepo(repoName) {
   try {
@@ -156,5 +172,6 @@ module.exports = {
   getRunStatus,
   getArtifactUrl,
   downloadArtifact,
+  getFileContent,
   deleteRepo
 };
