@@ -384,4 +384,60 @@ router.post('/log-violation', async (req, res) => {
   }
 });
 
+// ─── GET /api/admin/violations ────────────────────────────
+router.get('/violations', async (req, res) => {
+  const db = getDB();
+  try {
+    const snap = await db.collection('violations')
+      .orderBy('createdAt', 'desc')
+      .limit(100)
+      .get();
+    const violations = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.json({ violations });
+  } catch (err) {
+    console.error('[Violations]', err.message);
+    res.status(500).json({ error: 'Failed to fetch violations' });
+  }
+});
+
+// ─── DELETE /api/admin/delete-payment ─────────────────────
+router.delete('/delete-payment', async (req, res) => {
+  const { txnId } = req.body;
+  if (!txnId) return res.status(400).json({ error: 'txnId required' });
+  const db = getDB();
+  try {
+    const ref = db.collection('transactions').doc(txnId);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Transaction not found' });
+    await ref.delete();
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Delete Payment]', err.message);
+    res.status(500).json({ error: 'Failed to delete payment' });
+  }
+});
+
+// ─── DELETE /api/admin/delete-payments-bulk ───────────────
+router.delete('/delete-payments-bulk', async (req, res) => {
+  const { txnIds } = req.body;
+  if (!txnIds || !Array.isArray(txnIds) || txnIds.length === 0)
+    return res.status(400).json({ error: 'txnIds array required' });
+  if (txnIds.length > 100)
+    return res.status(400).json({ error: 'Max 100 transactions per bulk delete' });
+
+  const db = getDB();
+  try {
+    const batch = db.batch();
+    txnIds.forEach(id => {
+      batch.delete(db.collection('transactions').doc(id));
+    });
+    await batch.commit();
+    res.json({ success: true, deleted: txnIds.length });
+  } catch (err) {
+    console.error('[Bulk Delete Payments]', err.message);
+    res.status(500).json({ error: 'Failed to bulk delete payments' });
+  }
+});
+
+
 module.exports = router;
