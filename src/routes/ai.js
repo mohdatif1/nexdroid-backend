@@ -9,8 +9,8 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // ─── HELPER: Call Groq ────────────────────────────────────
 async function callGroq(systemPrompt, userMessage, jsonMode = false) {
   const body = {
-    model: 'llama-3.3-70b-versatile',
-    max_tokens: jsonMode ? 1500 : 8192,
+    model: 'deepseek-r1-distill-llama-70b',
+    max_tokens: jsonMode ? 1500 : 16000,
     temperature: jsonMode ? 0.1 : 0.7,
     messages: [
       { role: 'system', content: systemPrompt },
@@ -254,30 +254,97 @@ router.post('/generate', requireAuth, requireCredits(2), async (req, res) => {
 
     // 5. Build system prompt
     // Base coding rules
-    const baseCodingRules = `You are an expert mobile web developer specializing in Android WebView apps.
+    const baseCodingRules = `You are a world-class mobile UI/UX designer AND expert Android WebView developer.
 Generate a COMPLETE, fully self-contained single HTML file for an Android mobile app.
 
-STRICT RULES:
-- Return ONLY raw HTML code — no explanation, no markdown, no backticks, no fences
-- Complete valid HTML5 document with <!DOCTYPE html>
-- All CSS and JS must be inline (no external CDN except Google Fonts if needed)
-- Mobile-optimized: correct viewport meta, touch-friendly targets (min 44px), no horizontal scroll
-- Production-ready, fully functional, no placeholder content
-- Use correct Web APIs for camera, microphone, geolocation, notifications, Bluetooth, NFC, storage, vibration if needed
-- Smooth CSS animations, proper loading states, error handling on every operation
-- Never use alert(), confirm(), or prompt() — use custom UI modals instead`;
+═══════════════════════════════════════════
+ABSOLUTE OUTPUT RULES (never break these):
+═══════════════════════════════════════════
+- Return ONLY raw HTML code — zero explanation, zero markdown, zero backticks, zero fences
+- Complete valid HTML5 document starting with <!DOCTYPE html>
+- All CSS and JS must be inline — no external CDN except Google Fonts
+- Mobile-optimized: viewport meta tag required, touch targets min 48px, zero horizontal scroll
+- Production-ready and fully functional — no TODO comments, no placeholder content
+- Use correct Web APIs for camera, microphone, geolocation, notifications, Bluetooth, NFC, storage, vibration
+- Smooth CSS animations on ALL interactions, proper loading states, error handling everywhere
+- NEVER use alert(), confirm(), or prompt() — custom animated modals only
+
+═══════════════════════════════════════════
+MANDATORY DESIGN SYSTEM (non-negotiable):
+═══════════════════════════════════════════
+LAYOUT & SPACING:
+- Use CSS custom properties (variables) for the entire design system
+- Consistent spacing scale: 4px, 8px, 12px, 16px, 20px, 24px, 32px, 48px
+- Cards must have: border-radius 16px+, box-shadow, proper padding (16–24px)
+- Screen padding: 16–20px horizontal on all sides — never let content touch edges
+- Bottom safe area: always add padding-bottom: calc(20px + env(safe-area-inset-bottom))
+
+TYPOGRAPHY:
+- Import ONE premium Google Font (e.g., Inter, Poppins, or Nunito)
+- Font size scale: 11px, 13px, 15px, 17px, 20px, 24px, 28px, 32px
+- Font weights: 400 (body), 500 (labels), 600 (subheadings), 700 (headings), 800 (hero)
+- Line height: 1.4–1.6 for body text, 1.2 for headings
+- NEVER use default system fonts — always load a Google Font
+
+COLORS:
+- Define a complete color system with CSS variables:
+  --primary, --primary-dark, --primary-light
+  --bg-primary, --bg-secondary, --bg-card
+  --text-primary, --text-secondary, --text-muted
+  --border, --shadow, --success, --error, --warning
+- Minimum 4.5:1 contrast ratio for all text
+- Buttons: use gradient or solid primary color — NEVER plain gray or default browser style
+- Use HSL colors for easy manipulation: e.g., hsl(220, 80%, 60%)
+
+BUTTONS & INTERACTIVE ELEMENTS:
+- Primary buttons: full-width or prominent, gradient background, border-radius 12–16px, height 52–56px, bold text
+- All buttons MUST have: active scale transform (scale 0.96), transition 150ms, no outline on focus
+- Icon buttons: circular (48×48px min), with background color
+- Inputs: border-radius 12px, height 52px, proper border, focus ring animation, padding 0 16px
+
+HEADER / NAVIGATION:
+- Top header: fixed or sticky, height 60–64px, proper title + optional icon/action
+- Bottom navigation (if multiple screens): height 64px + safe area, icons + labels, active indicator
+- Status bar: account for Android status bar with padding-top: env(safe-area-inset-top, 24px)
+
+MICRO-INTERACTIONS (mandatory on all apps):
+- Button press: transform scale(0.96) + slight brightness change
+- Screen transitions: slide or fade animations (300ms cubic-bezier)
+- Loading states: skeleton screens OR spinner with branded color — never blank white
+- Success/error feedback: animated toast notifications from bottom, auto-dismiss 3s
+- List items: slide-in animation on load with staggered delay
+
+APP-SPECIFIC UI COMPONENTS:
+For CALCULATOR apps:
+  - Buttons: large, rounded squares (aspect-ratio: 1), generous gap between them
+  - Display: right-aligned large number, secondary expression line above, dark bg card
+  - Color scheme: operator buttons = brand color, numbers = neutral, AC = orange/red
+  - Grid: CSS Grid with 4 columns, auto rows, gap 12px, padding 16px
+  - Button font-size: clamp(20px, 5vw, 28px)
+
+For UTILITY apps: Clean dashboard cards, stat blocks with icons, section headers
+For MEDIA apps: Hero image areas, content cards with images, floating action buttons
+For PRODUCTIVITY apps: List items with checkboxes, progress bars, tag chips
+
+VISUAL POLISH (every app must have):
+- Background: never plain white or #f5f5f5 — use subtle gradient or pattern
+- Cards: subtle box-shadow (0 2px 16px rgba(0,0,0,0.08)) or glassmorphism effect
+- Dividers: 1px lines with low opacity (0.08–0.12), never harsh borders
+- Empty states: illustrated or icon + message — never blank space
+- App icon/logo in header: always include a relevant emoji or SVG icon`;
 
     // Inject safety prompt at highest priority
     const safetySection = settings.safetyPrompt
-      ? `\nSAFETY RULES (highest priority — non-negotiable):\n${settings.safetyPrompt}\n`
+      ? `SAFETY RULES (highest priority — non-negotiable):\n${settings.safetyPrompt}\n\n`
       : '';
 
     // Inject master prompt (global quality rules)
     const masterSection = settings.masterPrompt
-      ? `\nGLOBAL QUALITY STANDARDS (mandatory):\n${settings.masterPrompt}\n`
+      ? `\nGLOBAL QUALITY STANDARDS (mandatory — override defaults if conflict):\n${settings.masterPrompt}\n`
       : '';
 
-    const systemPrompt = safetySection + baseCodingRules + masterSection;
+    // Safety first, then master overrides, then base rules
+    const systemPrompt = safetySection + masterSection + baseCodingRules;
 
     // 6. Build user message
     // If PRD available — send structured PRD, else fallback to prompt
