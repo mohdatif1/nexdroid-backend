@@ -167,7 +167,7 @@ function serverSafetyCheck(input, settings) {
     phishing: ['phish', 'fake login', 'credential harvest', 'clone site', 'fake bank'],
     spyware:  ['spy', 'hidden camera', 'keylog', 'stalk', 'monitor without', 'secret record'],
     malware:  ['virus', 'worm', 'trojan', 'ransomware', 'malware', 'botnet'],
-    adult:    ['porn', 'adult content', 'nsfw', 'nude', 'xxx', 'explicit'],
+    adult:    ['porn', 'adult content', 'nsfw', 'nude', 'xxx', 'explicit content'],
     gambling: ['illegal bet', 'illegal gambl', 'casino hack', 'bet fraud'],
     weapon:   ['bomb', 'weapon guide', 'gun illegal', 'explosiv'],
     fraud:    ['fake upi', 'fake payment', 'money launder', 'ponzi'],
@@ -219,8 +219,8 @@ router.post('/generate', requireAuth, requireCredits(2), async (req, res) => {
 
   if (!prompt || prompt.trim().length < 5)
     return res.status(400).json({ error: 'Please provide a valid app description' });
-  if (prompt.length > 3000)
-    return res.status(400).json({ error: 'Prompt too long (max 3000 chars)' });
+  if (prompt.length > 50000)
+    return res.status(400).json({ error: 'Prompt too long (max 50000 chars)' });
 
   try {
     // 1. Fetch admin settings (masterPrompt + safetyPrompt + rules)
