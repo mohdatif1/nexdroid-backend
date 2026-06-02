@@ -9,8 +9,8 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 // ─── HELPER: Call Groq ────────────────────────────────────
 async function callGroq(systemPrompt, userMessage, jsonMode = false) {
   const body = {
-    model: 'deepseek-r1-distill-llama-70b',
-    max_tokens: jsonMode ? 1500 : 16000,
+    model: 'llama-3.3-70b-versatile',
+    max_tokens: jsonMode ? 1500 : 8192,
     temperature: jsonMode ? 0.1 : 0.7,
     messages: [
       { role: 'system', content: systemPrompt },
@@ -20,15 +20,21 @@ async function callGroq(systemPrompt, userMessage, jsonMode = false) {
 
   if (jsonMode) body.response_format = { type: 'json_object' };
 
-  const res = await axios.post(GROQ_URL, body, {
-    headers: {
-      'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    timeout: 60000
-  });
-
-  return res.data.choices?.[0]?.message?.content?.trim() || '';
+  try {
+    const res = await axios.post(GROQ_URL, body, {
+      headers: {
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 60000
+    });
+    return res.data.choices?.[0]?.message?.content?.trim() || '';
+  } catch (err) {
+    const status = err.response?.status;
+    const groqError = err.response?.data?.error?.message || JSON.stringify(err.response?.data);
+    console.error(`[Groq Error] Status: ${status} | Message: ${groqError}`);
+    throw new Error(`Groq API failed (${status}): ${groqError}`);
+  }
 }
 
 // ─── DEDUCT CREDITS ───────────────────────────────────────
