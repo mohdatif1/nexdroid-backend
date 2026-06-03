@@ -514,6 +514,26 @@ The PRD must include:
     const updatedUser = await userRef.get();
     const aiGenerated = updatedUser.data().aiGenerated || 1;
 
+    // 10. PRD history Firestore mein save karo
+    try {
+      await db.collection('prd_history').add({
+        uid:       req.user.uid,
+        appName:   appName.trim(),
+        category,
+        theme,
+        authType,
+        storageType,
+        features,
+        downloadEnabled,
+        extraNotes: extraNotes || '',
+        wordCount:  prd.split(/\s+/).length,
+        prd,
+        createdAt: new Date()
+      });
+    } catch (histErr) {
+      console.warn('[PRD History] Save failed (non-fatal):', histErr.message);
+    }
+
     res.json({ success: true, prd, creditsUsed: 1, aiGenerated });
 
   } catch (err) {
@@ -622,6 +642,37 @@ router.post('/prd-templates/:category', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[PRD Template POST]', err.message);
     res.status(500).json({ error: 'Failed to save PRD template: ' + err.message });
+  }
+});
+
+// ─── GET /api/ai/prd-history ──────────────────────────────
+// User ki PRD generation history fetch karo
+router.get('/prd-history', requireAuth, async (req, res) => {
+  const db = getDB();
+  try {
+    const snap = await db.collection('prd_history')
+      .where('uid', '==', req.user.uid)
+      .orderBy('createdAt', 'desc')
+      .limit(20)
+      .get();
+
+    const history = snap.docs.map(d => {
+      const data = d.data();
+      return {
+        id:          d.id,
+        appName:     data.appName     || 'Untitled',
+        category:    data.category    || 'utility',
+        theme:       data.theme       || 'dark',
+        wordCount:   data.wordCount   || 0,
+        prd:         data.prd         || '',
+        createdAt:   data.createdAt
+      };
+    });
+
+    res.json({ success: true, history });
+  } catch (err) {
+    console.error('[PRD History GET]', err.message);
+    res.status(500).json({ error: 'Failed to fetch PRD history: ' + err.message });
   }
 });
 
