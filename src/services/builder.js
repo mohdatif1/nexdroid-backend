@@ -117,11 +117,95 @@ dependencies {
 }`;
 }
 
-function generateMainActivity(packageName) {
+function generateMainActivity(packageName, permissions = []) {
+  // Sirf runtime (dangerous) permissions filter karo
+  const RUNTIME_PERMS = [
+    'android.permission.CAMERA',
+    'android.permission.RECORD_AUDIO',
+    'android.permission.ACCESS_FINE_LOCATION',
+    'android.permission.ACCESS_COARSE_LOCATION',
+    'android.permission.READ_EXTERNAL_STORAGE',
+    'android.permission.WRITE_EXTERNAL_STORAGE',
+    'android.permission.READ_MEDIA_IMAGES',
+    'android.permission.READ_MEDIA_VIDEO',
+    'android.permission.READ_MEDIA_AUDIO',
+    'android.permission.READ_CONTACTS',
+    'android.permission.WRITE_CONTACTS',
+    'android.permission.READ_CALL_LOG',
+    'android.permission.CALL_PHONE',
+    'android.permission.SEND_SMS',
+    'android.permission.RECEIVE_SMS',
+    'android.permission.USE_BIOMETRIC',
+    'android.permission.USE_FINGERPRINT',
+    'android.permission.POST_NOTIFICATIONS',
+    'android.permission.BLUETOOTH_CONNECT',
+    'android.permission.BLUETOOTH_SCAN',
+    'android.permission.NFC',
+    'android.permission.BODY_SENSORS',
+    'android.permission.ACTIVITY_RECOGNITION',
+  ];
+
+  // User permissions ko full form mein convert karo
+  const fullPerms = (permissions || []).map(p =>
+    p.includes('.') ? p : 'android.permission.' + p
+  );
+
+  // Sirf dangerous runtime permissions filter karo
+  const runtimeNeeded = fullPerms.filter(p => RUNTIME_PERMS.includes(p));
+
+  // Java Manifest.permission.XXX constants banao
+  const permConstants = runtimeNeeded.map(p =>
+    'android.Manifest.permission.' + p.replace('android.permission.', '')
+  );
+
+  // Java String array literal banao
+  const permArrayItems = permConstants.map(c => '\n            ' + c).join(',');
+  const permArrayLiteral = permConstants.length > 0
+    ? 'new String[]{' + permArrayItems + '\n        }'
+    : 'new String[]{}';
+
+  const hasRuntimePerms = permConstants.length > 0;
+
+  // Permission request in onCreate
+  const permRequestBlock = hasRuntimePerms
+    ? '\n        // Runtime permissions — 1st open pe maango\n        requestAppPermissions();\n'
+    : '';
+
+  // Permission methods
+  const permMethodBlock = hasRuntimePerms ? `
+    private static final int PERM_REQUEST_CODE = 1001;
+
+    private void requestAppPermissions() {
+        String[] required = ${permArrayLiteral};
+        java.util.List<String> toRequest = new java.util.ArrayList<>();
+        for (String perm : required) {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(this, perm)
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                toRequest.add(perm);
+            }
+        }
+        if (!toRequest.isEmpty()) {
+            androidx.core.app.ActivityCompat.requestPermissions(
+                this, toRequest.toArray(new String[0]), PERM_REQUEST_CODE
+            );
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == PERM_REQUEST_CODE && webView != null) {
+            webView.reload();
+        }
+    }
+` : '';
+
   return `package ${packageName};
 
+import android.app.Activity;
 import android.app.DownloadManager;
 import android.content.Context;
+import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
@@ -129,6 +213,7 @@ import android.webkit.CookieManager;
 import android.webkit.MimeTypeMap;
 import android.webkit.PermissionRequest;
 import android.webkit.URLUtil;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -139,11 +224,15 @@ import androidx.appcompat.app.AppCompatActivity;
 public class MainActivity extends AppCompatActivity {
     private WebView webView;
 
+    // File chooser (gallery/camera picker) ke liye
+    private ValueCallback<Uri[]> filePathCallback;
+    private static final int FILE_CHOOSER_REQUEST_CODE = 1002;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-
+${permRequestBlock}
         webView = findViewById(R.id.webview);
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -151,76 +240,156 @@ public class MainActivity extends AppCompatActivity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(true);
         settings.setGeolocationEnabled(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         settings.setUserAgentString(settings.getUserAgentString());
 
         webView.setWebViewClient(new WebViewClient());
         webView.setWebChromeClient(new WebChromeClient() {
+
+            // WebView permission requests (camera/mic in-browser)
             @Override
             public void onPermissionRequest(PermissionRequest request) {
                 request.grant(request.getResources());
             }
-        });
 
-        // ── Download Listener — har type ki file support ──────────────────
-        webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
-            try {
-                // File name nikalo — original extension preserve karo
-                String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
+            // ── File chooser — gallery/camera picker ──────────────────────
+            @Override
+            public boolean onShowFileChooser(WebView webView,
+                    ValueCallback<Uri[]> filePathCallback,
+                    FileChooserParams fileChooserParams) {
+                // Pehle se pending callback cancel karo
+                if (MainActivity.this.filePathCallback != null) {
+                    MainActivity.this.filePathCallback.onReceiveValue(null);
+                }
+                MainActivity.this.filePathCallback = filePathCallback;
 
-                // Agar extension nahi mili toh mimeType se dhundho
-                if (!fileName.contains(".")) {
-                    String ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType);
-                    if (ext != null && !ext.isEmpty()) {
-                        fileName = fileName + "." + ext;
+                String[] acceptTypes = fileChooserParams.getAcceptTypes();
+                boolean captureEnabled = fileChooserParams.isCaptureEnabled();
+
+                Intent intent;
+                if (captureEnabled) {
+                    // Camera se directly photo lene ke liye
+                    intent = new Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE);
+                } else {
+                    // Gallery / file picker
+                    intent = new Intent(Intent.ACTION_GET_CONTENT);
+                    if (acceptTypes != null && acceptTypes.length > 0 && !acceptTypes[0].isEmpty()) {
+                        intent.setType(acceptTypes[0]);
+                    } else {
+                        intent.setType("*/*");
+                    }
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    // Multiple select support
+                    if (fileChooserParams.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE) {
+                        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                     }
                 }
 
+                try {
+                    startActivityForResult(
+                        Intent.createChooser(intent, "Select File"),
+                        FILE_CHOOSER_REQUEST_CODE
+                    );
+                } catch (Exception e) {
+                    MainActivity.this.filePathCallback = null;
+                    Toast.makeText(getApplicationContext(),
+                        "File picker error: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                    return false;
+                }
+                return true;
+            }
+        });
+
+        // ── Download Listener — HTTP/HTTPS + blob URL dono handle karo ────
+        webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
+            try {
+                if (url.startsWith("blob:") || url.startsWith("data:")) {
+                    // Blob/data URL — JavaScript se download trigger karo
+                    String js =
+                        "javascript:(function(){" +
+                        "var x=document.createElement('a');" +
+                        "x.href='" + url.replace("'", "\'") + "';" +
+                        "x.download='';" +
+                        "document.body.appendChild(x);" +
+                        "x.click();" +
+                        "document.body.removeChild(x);" +
+                        "})()";
+                    webView.loadUrl(js);
+                    // Blob URL ke liye JS bridge inject karo
+                    webView.evaluateJavascript(
+                        "(function(){" +
+                        "if(window._blobDownloadPatched)return;" +
+                        "window._blobDownloadPatched=true;" +
+                        "var origCreate=URL.createObjectURL.bind(URL);" +
+                        "window._blobUrls={};" +
+                        "URL.createObjectURL=function(b){" +
+                        "  var u=origCreate(b);" +
+                        "  window._blobUrls[u]=b;" +
+                        "  return u;" +
+                        "};" +
+                        "})()", null);
+                    Toast.makeText(getApplicationContext(),
+                        "File download ho rha hai...", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+
+                // Normal HTTP/HTTPS download
+                String fileName = URLUtil.guessFileName(url, contentDisposition, mimeType);
+                if (!fileName.contains(".")) {
+                    String ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType);
+                    if (ext != null && !ext.isEmpty()) fileName = fileName + "." + ext;
+                }
                 DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
                 request.setMimeType(mimeType);
-
-                // Cookies add karo (authenticated downloads ke liye)
                 String cookies = CookieManager.getInstance().getCookie(url);
-                if (cookies != null) {
-                    request.addRequestHeader("cookie", cookies);
-                }
+                if (cookies != null) request.addRequestHeader("cookie", cookies);
                 request.addRequestHeader("User-Agent", userAgent);
-
                 request.setDescription("Downloading file...");
                 request.setTitle(fileName);
-
-                // Downloads folder mein save karo (file manager mein dikhega)
-                request.setDestinationInExternalPublicDir(
-                    Environment.DIRECTORY_DOWNLOADS, fileName
-                );
-
-                // Download complete hone pe notification dikhao
+                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
                 request.setNotificationVisibility(
-                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
-                );
-
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
                 DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
                 dm.enqueue(request);
-
-                Toast.makeText(
-                    getApplicationContext(),
-                    "Downloading: " + fileName,
-                    Toast.LENGTH_SHORT
-                ).show();
+                Toast.makeText(getApplicationContext(),
+                    "Downloading: " + fileName, Toast.LENGTH_SHORT).show();
 
             } catch (Exception e) {
-                Toast.makeText(
-                    getApplicationContext(),
-                    "Download failed: " + e.getMessage(),
-                    Toast.LENGTH_LONG
-                ).show();
+                Toast.makeText(getApplicationContext(),
+                    "Download failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
             }
         });
 
         webView.loadUrl("file:///android_asset/www/index.html");
     }
 
+    // ── File chooser result handle karo ───────────────────────────────────
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
+            if (filePathCallback == null) return;
+            Uri[] results = null;
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                if (data.getClipData() != null) {
+                    // Multiple files
+                    int count = data.getClipData().getItemCount();
+                    results = new Uri[count];
+                    for (int i = 0; i < count; i++) {
+                        results[i] = data.getClipData().getItemAt(i).getUri();
+                    }
+                } else if (data.getData() != null) {
+                    // Single file
+                    results = new Uri[]{ data.getData() };
+                }
+            }
+            filePathCallback.onReceiveValue(results);
+            filePathCallback = null;
+        }
+    }
+${permMethodBlock}
     @Override
     public void onBackPressed() {
         if (webView.canGoBack()) {
@@ -591,7 +760,7 @@ function generateProjectFiles(config, htmlCode) {
     // MainActivity.java
     {
       path: `app/src/main/java/${pkgPath}/MainActivity.java`,
-      content: generateMainActivity(packageName)
+      content: generateMainActivity(packageName, permissions)
     },
 
     // Layout
