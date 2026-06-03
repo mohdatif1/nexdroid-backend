@@ -2,31 +2,32 @@
 // Supports both APK (assembleRelease) and AAB (bundleRelease)
 
 function generateAndroidManifest(appName, packageName, versionCode, versionName, minSdk, orientation, permissions, targetSdk = '34') {
-  // Deduplicate permissions
-  const uniquePerms = [...new Set(permissions)];
-  const permLines = uniquePerms
-    .map(p => {
-      // Support full permission name (android.permission.X) or short (X)
-      const fullPerm = p.includes('.') ? p : `android.permission.${p}`;
-      return `    <uses-permission android:name="${fullPerm}" />`;
-    })
-    .join('\n');
+  // Base permissions jo hamesha chahiye — INTERNET + storage (with maxSdkVersion guards)
+  const BASE_PERMS = [
+    { name: 'android.permission.INTERNET',              extra: '' },
+    { name: 'android.permission.WRITE_EXTERNAL_STORAGE', extra: ' android:maxSdkVersion="28"' },
+    { name: 'android.permission.READ_EXTERNAL_STORAGE',  extra: ' android:maxSdkVersion="32"' },
+  ];
+
+  // User permissions ko full form mein convert karo
+  const userPerms = [...new Set(permissions)].map(p =>
+    p.includes('.') ? p : `android.permission.${p}`
+  );
+
+  // Base permission names — inhe user list se hata do taaki duplicate na ho
+  const basePermNames = BASE_PERMS.map(b => b.name);
+  const extraPerms = userPerms.filter(p => !basePermNames.includes(p));
+
+  // Sab lines banao
+  const permLines = [
+    ...BASE_PERMS.map(b => `    <uses-permission android:name="${b.name}"${b.extra} />`),
+    ...extraPerms.map(p => `    <uses-permission android:name="${p}" />`),
+  ].join('\n');
 
   return `<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="${packageName}"
-    android:versionCode="${versionCode}"
-    android:versionName="${versionName}">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-sdk
-        android:minSdkVersion="${minSdk}"
-        android:targetSdkVersion="${targetSdk}" />
-
-${permLines ? permLines + '\n' : ''}
-    <!-- Download ke liye required permissions -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+${permLines}
 
     <application
         android:allowBackup="true"
