@@ -393,6 +393,127 @@ VISUAL POLISH (every app must have):
   }
 });
 
+// ─── POST /api/ai/generate-prd ───────────────────────────
+router.post('/generate-prd', requireAuth, requireCredits(1), async (req, res) => {
+  const {
+    appName,
+    category      = 'custom',
+    theme         = 'dark',
+    authType      = 'none',
+    storageType   = 'local',
+    features      = [],
+    downloadEnabled = false,
+    storageKeys   = {},
+    extraNotes    = ''
+  } = req.body;
+
+  if (!appName || appName.trim().length < 2)
+    return res.status(400).json({ error: 'App ka naam do please' });
+
+  try {
+    // 1. Fetch admin settings
+    const settings = await fetchAiSettings();
+
+    // 2. Safety check
+    const safetyInput = `${appName} ${features.join(' ')} ${extraNotes}`;
+    const safetyResult = serverSafetyCheck(safetyInput, settings);
+    if (safetyResult.blocked) {
+      if ((settings.violationAction || 'block') === 'block_and_report') {
+        await logViolation(req.user.uid, safetyInput, safetyResult.reason);
+      }
+      return res.status(403).json({ error: `BLOCKED: ${safetyResult.reason}`, blocked: true });
+    }
+
+    // 3. Theme / auth / storage labels
+    const themeLabels = {
+      dark: 'Dark Mode (deep black/navy #0f0f14, #1a1a2e)',
+      light: 'Light Mode (white/gray backgrounds)',
+      colorful: 'Vibrant Colorful (bright gradients, bold colors)',
+      minimal: 'Ultra Minimal (pure white, black accents)',
+      gradient: 'Gradient (purple-to-blue backgrounds)',
+      glassmorphism: 'Glassmorphism (frosted glass, blur effects)'
+    };
+    const authLabels = {
+      none: 'No authentication — opens directly',
+      emailpass: 'Email + Password login/signup',
+      pin: '4-digit PIN entry screen',
+      google: 'Google Sign-In (OAuth)',
+      biometric: 'Fingerprint/Biometric auth',
+      phone: 'Phone number + OTP verification'
+    };
+    const storageLabels = {
+      local: 'localStorage (offline-first)',
+      firebase: 'Firebase Firestore + Auth',
+      supabase: 'Supabase PostgreSQL + Auth',
+      rest: 'Custom REST API',
+      none: 'No storage needed'
+    };
+
+    // 4. Build storage keys section
+    let storageKeysSection = '';
+    if (Object.keys(storageKeys).length > 0) {
+      storageKeysSection = '\n**Storage Credentials:**\n';
+      Object.entries(storageKeys).forEach(([k, v]) => {
+        storageKeysSection += `- ${k}: \`${v}\`\n`;
+      });
+    }
+
+    // 5. System prompt
+    const systemPrompt = `You are a senior product manager and mobile app architect at a top tech company.
+Generate a PROFESSIONAL, DETAILED Product Requirements Document (PRD) in clean Markdown format.
+
+RULES:
+- Write in clear, professional English
+- Be specific — no vague statements
+- Include exact UI component names, screen names, user flows
+- Every section must be detailed and actionable for a developer
+- Use proper Markdown: headers (##, ###), bullet points, bold text, code blocks where needed
+- Do NOT include any HTML code — only the PRD document
+- Make it comprehensive enough that a developer can build the app from this document alone`;
+
+    // 6. User message
+    const userMessage = `Generate a complete PRD for this Android mobile app:
+
+**App Name:** ${appName}
+**Category:** ${category}
+**Theme:** ${themeLabels[theme] || theme}
+**Authentication:** ${authLabels[authType] || authType}
+**Data Storage:** ${storageLabels[storageType] || storageType}${storageKeysSection}
+**Features Requested:** ${features.length > 0 ? features.join(', ') : 'Basic app functionality'}
+**Download Feature:** ${downloadEnabled ? 'YES — users can download files/content to device storage' : 'NO'}
+**Additional Requirements:** ${extraNotes || 'None'}
+
+The PRD must include:
+1. Executive Summary
+2. App Overview & Goals
+3. Target Users
+4. Complete Screen-by-Screen UI Specifications
+5. Feature Specifications (detailed, with user flows)
+6. Design System (colors, typography, components)
+7. Data Model & Storage Structure
+8. Authentication Flow (if applicable)
+9. Performance & Quality Requirements
+10. Edge Cases & Error Handling`;
+
+    // 7. Call Groq
+    const prd = await callGroq(systemPrompt, userMessage);
+
+    if (!prd || prd.length < 100)
+      return res.status(500).json({ error: 'PRD generation failed. Please try again.' });
+
+    // 8. Deduct 1 credit
+    await deductCredits(req.user.uid, 1, 'PRD generation');
+
+    res.json({ success: true, prd, creditsUsed: 1 });
+
+  } catch (err) {
+    console.error('[PRD Generate]', err.message);
+    if (err.message === 'Insufficient credits')
+      return res.status(402).json({ error: 'Insufficient credits' });
+    res.status(500).json({ error: 'PRD generation failed. Please try again.' });
+  }
+});
+
 // ─── POST /api/ai/analyze-perms ───────────────────────────
 router.post('/analyze-perms', requireAuth, async (req, res) => {
   const { code } = req.body;
