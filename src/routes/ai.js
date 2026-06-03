@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const admin = require('firebase-admin');
 const { requireAuth, requireCredits } = require('../middleware/auth');
 const { getDB } = require('../services/firebase');
 
@@ -504,7 +505,16 @@ The PRD must include:
     // 8. Deduct 1 credit
     await deductCredits(req.user.uid, 1, 'PRD generation');
 
-    res.json({ success: true, prd, creditsUsed: 1 });
+    // 9. Firestore mein aiGenerated increment karo
+    const db = getDB();
+    const userRef = db.collection('users').doc(req.user.uid);
+    await userRef.update({
+      aiGenerated: admin.firestore.FieldValue.increment(1)
+    });
+    const updatedUser = await userRef.get();
+    const aiGenerated = updatedUser.data().aiGenerated || 1;
+
+    res.json({ success: true, prd, creditsUsed: 1, aiGenerated });
 
   } catch (err) {
     console.error('[PRD Generate]', err.message);
