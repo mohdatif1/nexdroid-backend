@@ -68,19 +68,20 @@ router.get('/transactions', requireAuth, async (req, res) => {
 
     const transactions = snap.docs.map(d => {
       const data = d.data();
-      const txType = data.type || 'credit'; // 'credit', 'build', 'prd', 'debit' etc.
+      const txType = data.type || 'credit';
 
       // Display name logic
       let planName = data.planName || data.description || '';
       if (!planName) {
-        if (txType === 'build')   planName = 'APK Build';
-        else if (txType === 'prd') planName = 'PRD Generation';
+        if (txType === 'build')        planName = 'APK Build';
+        else if (txType === 'update')  planName = 'App Update';
+        else if (txType === 'prd')     planName = 'PRD Generation';
         else if (txType === 'signed_apk') planName = 'Signed APK Build';
-        else                       planName = 'Credit Purchase';
+        else                           planName = 'Credit Purchase';
       }
 
       // Credits: debit types show as negative
-      const isDebit = txType === 'build' || txType === 'prd' ||
+      const isDebit = txType === 'build' || txType === 'update' || txType === 'prd' ||
                       txType === 'signed_apk' || txType === 'debit' ||
                       (data.credits && data.credits < 0);
       const credits = data.credits ? Math.abs(data.credits) : 0;
@@ -98,6 +99,12 @@ router.get('/transactions', requireAuth, async (req, res) => {
         createdAt:   data.createdAt,
         approvedAt:  data.approvedAt  || null,
       };
+    })
+    // 0-credit bogus entries filter karo — sirf credit purchases jo 0 hain
+    .filter(t => {
+      if (t.isDebit) return true;           // debit entries hamesha dikhao
+      if (t.status === 'pending') return true; // pending payments dikhao
+      return t.credits > 0;                 // credit entries sirf tab jab credits > 0
     });
 
     // In-memory sort (fallback ke liye)
