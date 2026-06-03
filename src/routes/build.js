@@ -10,7 +10,7 @@ const router = express.Router();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ─── DEDUCT CREDITS ───────────────────────────────────────
-async function deductCredits(uid, amount, reason) {
+async function deductCredits(uid, amount, reason, txType = 'build') {
   const db = getDB();
   const ref = db.collection('users').doc(uid);
   await db.runTransaction(async (t) => {
@@ -19,7 +19,13 @@ async function deductCredits(uid, amount, reason) {
     if (current < amount) throw new Error('Insufficient credits');
     t.update(ref, { credits: current - amount, updatedAt: new Date() });
     t.set(db.collection('transactions').doc(), {
-      uid, type: 'debit', amount, reason, createdAt: new Date()
+      uid,
+      type:      txType,
+      planName:  reason,
+      credits:   amount,
+      isDebit:   true,
+      status:    'approved',
+      createdAt: new Date()
     });
   });
 }
@@ -42,7 +48,7 @@ async function updateBuildStatus(buildId, status, progress, msg) {
 }
 
 // ─── POST /api/build/start ────────────────────────────────
-router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
+router.post('/start', requireAuth, async (req, res) => {
   const {
     htmlCode,
     appName,
@@ -57,7 +63,8 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
     buildType          = 'apk',
     iconBase64         = null,
     keystore           = {},
-    admob              = null
+    admob              = null,
+    isUpdate           = false
   } = req.body;
 
   // Merge permissions + customPermissions (deduplicate)
@@ -93,9 +100,18 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
   const repoName = `nexdroid-${safePkg}`;
   const uid      = req.user.uid;
   const isAAB    = buildType === 'aab';
+  const creditCost = isUpdate ? 3 : 5;
+  const txType     = isUpdate ? 'update' : 'build';
 
   try {
     const db = getDB();
+
+    // Manual credits check (requireCredits middleware hataya — dynamic cost ke liye)
+    const userDoc = await db.collection('users').doc(uid).get();
+    const currentCredits = userDoc.exists ? (userDoc.data().credits || 0) : 0;
+    if (currentCredits < creditCost) {
+      return res.status(402).json({ error: `Insufficient credits. ${creditCost} credits chahiye.` });
+    }
 
     // ── Same packageName ki existing build dhundho (usi entry update karenge) ──
     const existingSnap = await db.collection('builds')
@@ -142,7 +158,7 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
       });
     }
 
-    await deductCredits(uid, 5, `${isAAB ? 'AAB' : 'APK'} build: ${appName}`);
+    await deductCredits(uid, creditCost, `${isUpdate ? 'App Update' : (isAAB ? 'AAB' : 'APK')} build: ${appName}`, txType);
 
     res.json({ success: true, buildId: finalBuildId, status: 'queued', buildType });
 
@@ -362,6 +378,23 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
     // APK generate hone ke baad keystore artifact se Firestore mein save karo
     await saveKeystoreFromArtifact(config.packageName, repoName, runId, ksResult);
 
+    // Signing profile Firestore mein save karo (auto-fill ke liye)
+    try {
+      await db.collection('signingProfiles').doc(`${uid}_${config.packageName}`).set({
+        uid,
+        packageName:  config.packageName,
+        appName:      config.appName || '',
+        alias:        config.keystoreConfig.alias   || 'release',
+        cn:           config.keystoreConfig.cn      || '',
+        org:          config.keystoreConfig.org     || '',
+        country:      config.keystoreConfig.country || 'IN',
+        updatedAt:    new Date(),
+        createdAt:    admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    } catch (spErr) {
+      console.warn('[SigningProfile] Save failed (non-fatal):', spErr.message);
+    }
+
   } catch (err) {
     await log(`Build failed: ${err.message}`, -1);
     await db.collection('builds').doc(buildId).update({
@@ -532,6 +565,31 @@ router.get('/:id', requireAuth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch build status' });
+  }
+});
+
+// ─── GET /api/build/signing-profile/:packageName ─────────
+router.get('/signing-profile/:packageName', requireAuth, async (req, res) => {
+  const db = getDB();
+  const { packageName } = req.params;
+  try {
+    const doc = await db.collection('signingProfiles')
+      .doc(`${req.user.uid}_${packageName}`)
+      .get();
+    if (!doc.exists) return res.json({ found: false });
+    const data = doc.data();
+    res.json({
+      found:     true,
+      appName:   data.appName  || '',
+      alias:     data.alias    || 'release',
+      cn:        data.cn       || '',
+      org:       data.org      || '',
+      country:   data.country  || 'IN',
+      updatedAt: data.updatedAt
+    });
+  } catch (err) {
+    console.error('[SigningProfile GET]', err.message);
+    res.status(500).json({ error: 'Failed to fetch signing profile' });
   }
 });
 
