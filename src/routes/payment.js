@@ -55,29 +55,46 @@ router.get('/transactions', requireAuth, async (req, res) => {
     try {
       snap = await db.collection('transactions')
         .where('uid', '==', req.user.uid)
-        .where('type', '==', 'credit')
         .orderBy('createdAt', 'desc')
-        .limit(50)
+        .limit(100)
         .get();
     } catch (e) {
       // Index missing fallback
       snap = await db.collection('transactions')
         .where('uid', '==', req.user.uid)
-        .where('type', '==', 'credit')
-        .limit(50)
+        .limit(100)
         .get();
     }
 
     const transactions = snap.docs.map(d => {
       const data = d.data();
+      const txType = data.type || 'credit'; // 'credit', 'build', 'prd', 'debit' etc.
+
+      // Display name logic
+      let planName = data.planName || data.description || '';
+      if (!planName) {
+        if (txType === 'build')   planName = 'APK Build';
+        else if (txType === 'prd') planName = 'PRD Generation';
+        else if (txType === 'signed_apk') planName = 'Signed APK Build';
+        else                       planName = 'Credit Purchase';
+      }
+
+      // Credits: debit types show as negative
+      const isDebit = txType === 'build' || txType === 'prd' ||
+                      txType === 'signed_apk' || txType === 'debit' ||
+                      (data.credits && data.credits < 0);
+      const credits = data.credits ? Math.abs(data.credits) : 0;
+
       return {
         id:          d.id,
-        planName:    data.planName    || 'Credit Purchase',
-        credits:     data.credits     || 0,
+        type:        txType,
+        isDebit:     isDebit,
+        planName,
+        credits,
         price:       data.price       || 0,
         paidAmount:  data.paidAmount  || data.price || 0,
         txnRef:      data.txnRef      || '',
-        status:      data.status      || 'pending',
+        status:      data.status      || (isDebit ? 'approved' : 'pending'),
         createdAt:   data.createdAt,
         approvedAt:  data.approvedAt  || null,
       };
