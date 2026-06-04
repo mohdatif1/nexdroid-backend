@@ -1,122 +1,110 @@
 const express = require('express');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireAuthOrNew } = require('../middleware/auth');
 const { getDB } = require('../services/firebase');
 
 const router = express.Router();
 
-// ─── POST /api/payment/submit ─────────────────────────────
-// User payment submit karta hai — pending status mein save hoga
-router.post('/submit', requireAuth, async (req, res) => {
-  const { planName, credits, price, txnRef } = req.body;
-  if (!planName || !credits || !price || !txnRef) {
-    return res.status(400).json({ error: 'planName, credits, price, txnRef required' });
-  }
+// ─── POST /api/auth/register ──────────────────────────────
+// requireAuthOrNew — token verify karo but user na ho to bhi allow karo
+router.post('/register', requireAuthOrNew, async (req, res) => {
+  const { uid, email, name: tokenName } = req.user;
   const db = getDB();
+
   try {
-    // Check karo pehle yeh txnRef already use nahi hua
-    const existing = await db.collection('transactions')
-      .where('txnRef', '==', txnRef)
-      .limit(1)
-      .get();
-    if (!existing.empty) {
-      return res.status(400).json({ error: 'This Transaction ID already submitted' });
+    const ref = db.collection('users').doc(uid);
+    const existing = await ref.get();
+
+    if (existing.exists) {
+      console.log('[Register] User already exists:', uid);
+      return res.json({
+        success: true,
+        user: { uid, email, ...existing.data() }
+      });
     }
 
-    // User info
-    const userDoc = await db.collection('users').doc(req.user.uid).get();
-    const userData = userDoc.exists ? userDoc.data() : {};
+    // New user — signup bonus Firestore se fetch karo (default 15)
+    let signupBonus = 15;
+    try {
+      const pricingDoc = await db.collection('appConfig').doc('creditPricing').get();
+      if (pricingDoc.exists && typeof pricingDoc.data().signupBonus === 'number') {
+        signupBonus = pricingDoc.data().signupBonus;
+      }
+    } catch (e) {
+      console.warn('[Register] Could not fetch signupBonus, using default 15');
+    }
 
-    await db.collection('transactions').add({
-      uid:       req.user.uid,
-      userName:  userData.name || userData.displayName || '',
-      userEmail: userData.email || req.user.email || '',
-      planName,
-      credits:   Number(credits),
-      price:     Number(price),
-      paidAmount:Number(price),
-      txnRef,
+    const userData = {
+      uid,
+      email,
+      name: req.body.name || tokenName || email.split('@')[0],
+      credits: signupBonus,
+      totalBuilds: 0,
+      aiGenerated: 0,
+      isAdmin: false,
+      plan: 'free',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    await ref.set(userData);
+
+    // Signup bonus transaction log
+    await db.collection('transactions').doc().set({
+      uid,
       type:      'credit',
-      status:    'pending',
+      planName:  'Signup Bonus',
+      credits:   signupBonus,
+      isDebit:   false,
+      status:    'approved',
       createdAt: new Date()
     });
 
-    res.json({ success: true, message: 'Payment submitted. Pending admin approval.' });
+    console.log(`[Register] New user created: ${uid} — ${signupBonus} credits given`);
+    res.json({ success: true, user: userData });
+
   } catch (err) {
-    res.status(500).json({ error: 'Failed to submit payment' });
+    console.error('[Auth Register]', err.message);
+    res.status(500).json({ error: 'Registration failed: ' + err.message });
   }
 });
 
-// ─── GET /api/payment/transactions ───────────────────────
-// Logged-in user ki saari transactions return karo
+// ─── GET /api/auth/me ─────────────────────────────────────
+router.get('/me', requireAuth, async (req, res) => {
+  const data = req.userData;
+  res.json({
+    uid: req.user.uid,
+    email: req.user.email,
+    name: data.name,
+    credits: data.credits || 0,
+    totalBuilds: data.totalBuilds || 0,
+    aiGenerated: data.aiGenerated || 0,
+    plan: data.plan || 'free',
+    isAdmin: data.isAdmin || false
+  });
+});
+
+// ─── GET /api/auth/credits ────────────────────────────────
+router.get('/credits', requireAuth, async (req, res) => {
+  res.json({ credits: req.userData.credits || 0 });
+});
+
+// ─── GET /api/auth/transactions ───────────────────────────
 router.get('/transactions', requireAuth, async (req, res) => {
   const db = getDB();
   try {
-    let snap;
-    try {
-      snap = await db.collection('transactions')
-        .where('uid', '==', req.user.uid)
-        .orderBy('createdAt', 'desc')
-        .limit(100)
-        .get();
-    } catch (e) {
-      // Index missing fallback
-      snap = await db.collection('transactions')
-        .where('uid', '==', req.user.uid)
-        .limit(100)
-        .get();
-    }
+    const snap = await db.collection('transactions')
+      .where('uid', '==', req.user.uid)
+      .orderBy('createdAt', 'desc')
+      .limit(20)
+      .get();
 
-    const transactions = snap.docs.map(d => {
-      const data = d.data();
-      const txType = data.type || 'credit';
-
-      // Display name logic
-      let planName = data.planName || data.description || '';
-      if (!planName) {
-        if (txType === 'build')        planName = 'APK Build';
-        else if (txType === 'update')  planName = 'App Update';
-        else if (txType === 'prd')     planName = 'PRD Generation';
-        else if (txType === 'signed_apk') planName = 'Signed APK Build';
-        else                           planName = 'Credit Purchase';
-      }
-
-      // Credits: debit types show as negative
-      const isDebit = txType === 'build' || txType === 'update' || txType === 'prd' ||
-                      txType === 'signed_apk' || txType === 'debit' ||
-                      (data.credits && data.credits < 0);
-      const credits = data.credits ? Math.abs(data.credits) : 0;
-
-      return {
-        id:          d.id,
-        type:        txType,
-        isDebit:     isDebit,
-        planName,
-        credits,
-        price:       data.price       || 0,
-        paidAmount:  data.paidAmount  || data.price || 0,
-        txnRef:      data.txnRef      || '',
-        status:      data.status      || (isDebit ? 'approved' : 'pending'),
-        createdAt:   data.createdAt,
-        approvedAt:  data.approvedAt  || null,
-      };
-    })
-    // 0-credit bogus entries filter karo — sirf credit purchases jo 0 hain
-    .filter(t => {
-      if (t.isDebit) return true;           // debit entries hamesha dikhao
-      if (t.status === 'pending') return true; // pending payments dikhao
-      return t.credits > 0;                 // credit entries sirf tab jab credits > 0
-    });
-
-    // In-memory sort (fallback ke liye)
-    transactions.sort((a, b) => {
-      const ta = a.createdAt?._seconds || 0;
-      const tb = b.createdAt?._seconds || 0;
-      return tb - ta;
-    });
-
-    res.json({ transactions });
+    const txns = snap.docs.map(d => ({
+      id: d.id,
+      ...d.data(),
+      createdAt: d.data().createdAt?.toDate?.() || d.data().createdAt
+    }));
+    res.json({ transactions: txns });
   } catch (err) {
-    console.error('transactions fetch error:', err.message);
     res.status(500).json({ error: 'Failed to fetch transactions' });
   }
 });
