@@ -9,6 +9,23 @@ const { generateProjectFiles } = require('../services/builder');
 const router = express.Router();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// ─── DYNAMIC CREDIT COST ──────────────────────────────────
+const PRICING_DEFAULTS = { newBuild: 5, update: 3, prd: 1 };
+
+async function getCreditCost(type) {
+  try {
+    const db = getDB();
+    const doc = await db.collection('appConfig').doc('creditPricing').get();
+    if (doc.exists) {
+      const val = doc.data()[type];
+      if (typeof val === 'number' && val >= 1) return val;
+    }
+  } catch (e) {
+    console.warn('[CreditCost] Firestore fetch failed, using default:', e.message);
+  }
+  return PRICING_DEFAULTS[type] ?? 5;
+}
+
 // ─── DEDUCT CREDITS ───────────────────────────────────────
 async function deductCredits(uid, amount, reason, txType = 'build') {
   const db = getDB();
@@ -95,18 +112,20 @@ router.post('/start', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'buildType must be apk or aab' });
 
   const buildId  = uuidv4();
-  // Repo name based on packageName so same app reuses same repo & keystore
   const safePkg  = packageName.replace(/\./g, '-').toLowerCase();
   const repoName = `nexdroid-${safePkg}`;
   const uid      = req.user.uid;
   const isAAB    = buildType === 'aab';
-  const creditCost = isUpdate ? 3 : 5;
+
+  // Dynamic pricing — Firestore se fetch karo
+  const priceType  = isUpdate ? 'update' : 'newBuild';
+  const creditCost = await getCreditCost(priceType);
   const txType     = isUpdate ? 'update' : 'build';
 
   try {
     const db = getDB();
 
-    // Manual credits check (requireCredits middleware hataya — dynamic cost ke liye)
+    // Manual credits check
     const userDoc = await db.collection('users').doc(uid).get();
     const currentCredits = userDoc.exists ? (userDoc.data().credits || 0) : 0;
     if (currentCredits < creditCost) {
@@ -378,8 +397,9 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
     // APK generate hone ke baad keystore artifact se Firestore mein save karo
     await saveKeystoreFromArtifact(config.packageName, repoName, runId, ksResult);
 
-    // Signing profile Firestore mein save karo (auto-fill ke liye)
+    // Signing profile save karo (auto-fill ke liye)
     try {
+      const db = getDB();
       await db.collection('signingProfiles').doc(`${uid}_${config.packageName}`).set({
         uid,
         packageName:  config.packageName,
