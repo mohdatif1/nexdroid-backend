@@ -440,4 +440,47 @@ router.delete('/delete-payments-bulk', async (req, res) => {
 });
 
 
+// ─── GET /api/admin/credit-pricing ───────────────────────
+router.get('/credit-pricing', async (req, res) => {
+  const db = getDB();
+  try {
+    const doc = await db.collection('appConfig').doc('creditPricing').get();
+    if (!doc.exists) return res.json({ newBuild: 5, update: 3, prd: 1 });
+    const d = doc.data();
+    res.json({
+      newBuild: d.newBuild ?? 5,
+      update:   d.update   ?? 3,
+      prd:      d.prd      ?? 1
+    });
+  } catch (err) {
+    console.error('[CreditPricing GET]', err.message);
+    res.status(500).json({ error: 'Failed to fetch credit pricing' });
+  }
+});
+
+// ─── PUT /api/admin/credit-pricing ───────────────────────
+router.put('/credit-pricing', async (req, res) => {
+  const { newBuild, update, prd } = req.body;
+  if (
+    typeof newBuild !== 'number' || newBuild < 1 ||
+    typeof update   !== 'number' || update   < 1 ||
+    typeof prd      !== 'number' || prd      < 1
+  ) {
+    return res.status(400).json({ error: 'Invalid values — minimum 1 credit required' });
+  }
+  const db = getDB();
+  try {
+    await db.collection('appConfig').doc('creditPricing').set({
+      newBuild, update, prd,
+      updatedAt: new Date(),
+      updatedBy: req.user.uid
+    }, { merge: true });
+    console.log(`[CreditPricing] Updated by ${req.user.uid}: newBuild=${newBuild}, update=${update}, prd=${prd}`);
+    res.json({ success: true, newBuild, update, prd });
+  } catch (err) {
+    console.error('[CreditPricing PUT]', err.message);
+    res.status(500).json({ error: 'Failed to save credit pricing' });
+  }
+});
+
 module.exports = router;
