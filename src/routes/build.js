@@ -9,25 +9,8 @@ const { generateProjectFiles } = require('../services/builder');
 const router = express.Router();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// ─── DYNAMIC CREDIT COST ──────────────────────────────────
-const PRICING_DEFAULTS = { newBuild: 5, update: 3, prd: 1 };
-
-async function getCreditCost(type) {
-  try {
-    const db = getDB();
-    const doc = await db.collection('appConfig').doc('creditPricing').get();
-    if (doc.exists) {
-      const val = doc.data()[type];
-      if (typeof val === 'number' && val >= 1) return val;
-    }
-  } catch (e) {
-    console.warn('[CreditCost] Firestore fetch failed, using default:', e.message);
-  }
-  return PRICING_DEFAULTS[type] ?? 5;
-}
-
 // ─── DEDUCT CREDITS ───────────────────────────────────────
-async function deductCredits(uid, amount, reason, txType = 'build') {
+async function deductCredits(uid, amount, reason) {
   const db = getDB();
   const ref = db.collection('users').doc(uid);
   await db.runTransaction(async (t) => {
@@ -36,13 +19,7 @@ async function deductCredits(uid, amount, reason, txType = 'build') {
     if (current < amount) throw new Error('Insufficient credits');
     t.update(ref, { credits: current - amount, updatedAt: new Date() });
     t.set(db.collection('transactions').doc(), {
-      uid,
-      type:      txType,
-      planName:  reason,
-      credits:   amount,
-      isDebit:   true,
-      status:    'approved',
-      createdAt: new Date()
+      uid, type: 'debit', amount, reason, createdAt: new Date()
     });
   });
 }
@@ -65,7 +42,7 @@ async function updateBuildStatus(buildId, status, progress, msg) {
 }
 
 // ─── POST /api/build/start ────────────────────────────────
-router.post('/start', requireAuth, async (req, res) => {
+router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
   const {
     htmlCode,
     appName,
@@ -80,8 +57,7 @@ router.post('/start', requireAuth, async (req, res) => {
     buildType          = 'apk',
     iconBase64         = null,
     keystore           = {},
-    admob              = null,
-    isUpdate           = false
+    admob              = null
   } = req.body;
 
   // Merge permissions + customPermissions (deduplicate)
@@ -112,25 +88,14 @@ router.post('/start', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'buildType must be apk or aab' });
 
   const buildId  = uuidv4();
+  // Repo name based on packageName so same app reuses same repo & keystore
   const safePkg  = packageName.replace(/\./g, '-').toLowerCase();
   const repoName = `nexdroid-${safePkg}`;
   const uid      = req.user.uid;
   const isAAB    = buildType === 'aab';
 
-  // Dynamic pricing — Firestore se fetch karo
-  const priceType  = isUpdate ? 'update' : 'newBuild';
-  const creditCost = await getCreditCost(priceType);
-  const txType     = isUpdate ? 'update' : 'build';
-
   try {
     const db = getDB();
-
-    // Manual credits check
-    const userDoc = await db.collection('users').doc(uid).get();
-    const currentCredits = userDoc.exists ? (userDoc.data().credits || 0) : 0;
-    if (currentCredits < creditCost) {
-      return res.status(402).json({ error: `Insufficient credits. ${creditCost} credits chahiye.` });
-    }
 
     // ── Same packageName ki existing build dhundho (usi entry update karenge) ──
     const existingSnap = await db.collection('builds')
@@ -170,9 +135,10 @@ router.post('/start', requireAuth, async (req, res) => {
         // createdAt preserve karo — sirf updatedAt change hoga
       });
     } else {
-      // Pehli baar — naya entry banao
+      // Pehli baar — naya entry banao + htmlCode save karo
       await db.collection('builds').doc(buildId).set({
         ...buildData,
+        htmlCode,   // 1st build ka HTML Firestore mein save
         createdAt: new Date()
       });
     }
@@ -397,24 +363,6 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
     // APK generate hone ke baad keystore artifact se Firestore mein save karo
     await saveKeystoreFromArtifact(config.packageName, repoName, runId, ksResult);
 
-    // Signing profile save karo (auto-fill ke liye)
-    try {
-      const db = getDB();
-      await db.collection('signingProfiles').doc(`${uid}_${config.packageName}`).set({
-        uid,
-        packageName:  config.packageName,
-        appName:      config.appName || '',
-        alias:        config.keystoreConfig.alias   || 'release',
-        cn:           config.keystoreConfig.cn      || '',
-        org:          config.keystoreConfig.org     || '',
-        country:      config.keystoreConfig.country || 'IN',
-        updatedAt:    new Date(),
-        createdAt:    admin.firestore.FieldValue.serverTimestamp()
-      }, { merge: true });
-    } catch (spErr) {
-      console.warn('[SigningProfile] Save failed (non-fatal):', spErr.message);
-    }
-
   } catch (err) {
     await log(`Build failed: ${err.message}`, -1);
     await db.collection('builds').doc(buildId).update({
@@ -585,31 +533,6 @@ router.get('/:id', requireAuth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch build status' });
-  }
-});
-
-// ─── GET /api/build/signing-profile/:packageName ─────────
-router.get('/signing-profile/:packageName', requireAuth, async (req, res) => {
-  const db = getDB();
-  const { packageName } = req.params;
-  try {
-    const doc = await db.collection('signingProfiles')
-      .doc(`${req.user.uid}_${packageName}`)
-      .get();
-    if (!doc.exists) return res.json({ found: false });
-    const data = doc.data();
-    res.json({
-      found:     true,
-      appName:   data.appName  || '',
-      alias:     data.alias    || 'release',
-      cn:        data.cn       || '',
-      org:       data.org      || '',
-      country:   data.country  || 'IN',
-      updatedAt: data.updatedAt
-    });
-  } catch (err) {
-    console.error('[SigningProfile GET]', err.message);
-    res.status(500).json({ error: 'Failed to fetch signing profile' });
   }
 });
 
