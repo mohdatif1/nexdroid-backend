@@ -22,12 +22,22 @@ router.post('/register', requireAuthOrNew, async (req, res) => {
       });
     }
 
-    // New user — 15 free credits
+    // New user — signup bonus Firestore se fetch karo (default 15)
+    let signupBonus = 15;
+    try {
+      const pricingDoc = await db.collection('appConfig').doc('creditPricing').get();
+      if (pricingDoc.exists && typeof pricingDoc.data().signupBonus === 'number') {
+        signupBonus = pricingDoc.data().signupBonus;
+      }
+    } catch (e) {
+      console.warn('[Register] Could not fetch signupBonus, using default 15');
+    }
+
     const userData = {
       uid,
       email,
       name: req.body.name || tokenName || email.split('@')[0],
-      credits: 15,
+      credits: signupBonus,
       totalBuilds: 0,
       aiGenerated: 0,
       isAdmin: false,
@@ -41,13 +51,15 @@ router.post('/register', requireAuthOrNew, async (req, res) => {
     // Signup bonus transaction log
     await db.collection('transactions').doc().set({
       uid,
-      type: 'credit',
-      amount: 15,
-      reason: 'Signup bonus',
+      type:      'credit',
+      planName:  'Signup Bonus',
+      credits:   signupBonus,
+      isDebit:   false,
+      status:    'approved',
       createdAt: new Date()
     });
 
-    console.log('[Register] New user created:', uid, '— 15 credits given');
+    console.log(`[Register] New user created: ${uid} — ${signupBonus} credits given`);
     res.json({ success: true, user: userData });
 
   } catch (err) {
