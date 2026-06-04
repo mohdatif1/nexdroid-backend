@@ -42,7 +42,7 @@ async function updateBuildStatus(buildId, status, progress, msg) {
 }
 
 // ─── POST /api/build/start ────────────────────────────────
-router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
+router.post('/start', requireAuth, async (req, res) => {
   const {
     htmlCode,
     appName,
@@ -57,7 +57,8 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
     buildType          = 'apk',
     iconBase64         = null,
     keystore           = {},
-    admob              = null
+    admob              = null,
+    isUpdate           = false
   } = req.body;
 
   // Merge permissions + customPermissions (deduplicate)
@@ -96,6 +97,29 @@ router.post('/start', requireAuth, requireCredits(5), async (req, res) => {
 
   try {
     const db = getDB();
+
+    // ── Firestore se live credit pricing fetch karo ──────
+    let pricing = { newBuild: 5, update: 3 };
+    try {
+      const pDoc = await db.collection('appConfig').doc('creditPricing').get();
+      if (pDoc.exists) {
+        const pd = pDoc.data();
+        pricing.newBuild = pd.newBuild ?? 5;
+        pricing.update   = pd.update   ?? 3;
+      }
+    } catch (pe) {
+      console.warn('[Build] Pricing fetch failed, using defaults:', pe.message);
+    }
+
+    const creditCost = isUpdate ? pricing.update : pricing.newBuild;
+    const txType     = isUpdate ? 'update' : 'build';
+
+    // Credit check
+    const userDoc = await db.collection('users').doc(uid).get();
+    const userCredits = (userDoc.exists ? userDoc.data().credits : 0) || 0;
+    if (userCredits < creditCost) {
+      return res.status(402).json({ error: `Insufficient credits. ${creditCost} credits required.` });
+    }
 
     // ── Same packageName ki existing build dhundho (usi entry update karenge) ──
     const existingSnap = await db.collection('builds')
@@ -533,81 +557,6 @@ router.get('/:id', requireAuth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch build status' });
-  }
-});
-
-// ─── DELETE /api/build/:id ───────────────────────────────
-router.delete('/:id', requireAuth, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const db  = getDB();
-    const doc = await db.collection('builds').doc(id).get();
-    if (!doc.exists) return res.status(404).json({ error: 'Build not found' });
-
-    const data = doc.data();
-    if (data.uid !== req.user.uid)
-      return res.status(403).json({ error: 'Access denied' });
-
-    const deletable = ['failed', 'cancelled'];
-    if (!deletable.includes(data.status))
-      return res.status(400).json({ error: 'Only failed or cancelled builds can be deleted' });
-
-    await db.collection('builds').doc(id).delete();
-    res.json({ success: true });
-  } catch (err) {
-    console.error('[Delete Build]', err.message);
-    res.status(500).json({ error: 'Failed to delete build' });
-  }
-});
-
-// ─── POST /api/build/:id/cancel ──────────────────────────
-router.post('/:id/cancel', requireAuth, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const db  = getDB();
-    const doc = await db.collection('builds').doc(id).get();
-    if (!doc.exists) return res.status(404).json({ error: 'Build not found' });
-
-    const data = doc.data();
-    if (data.uid !== req.user.uid)
-      return res.status(403).json({ error: 'Access denied' });
-
-    const cancellable = ['queued', 'building', 'processing'];
-    if (!cancellable.includes(data.status))
-      return res.status(400).json({ error: 'Build already completed or cancelled' });
-
-    await db.collection('builds').doc(id).update({
-      status:    'cancelled',
-      updatedAt: new Date(),
-      logs:      admin.firestore.FieldValue.arrayUnion(
-        `[${new Date().toLocaleTimeString()}] Build cancelled by user`
-      )
-    });
-
-    // GitHub Actions run cancel karo (best-effort)
-    try {
-      const repoName = data.repoName;
-      if (repoName) {
-        const run = await github.getLatestRun(repoName);
-        if (run?.id) {
-          const axios    = require('axios');
-          const GH_TOKEN = process.env.GITHUB_TOKEN;
-          const GH_OWNER = process.env.GITHUB_USERNAME;
-          await axios.post(
-            `https://api.github.com/repos/${GH_OWNER}/${repoName}/actions/runs/${run.id}/cancel`,
-            {},
-            { headers: { Authorization: `Bearer ${GH_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } }
-          );
-        }
-      }
-    } catch (ghErr) {
-      console.warn('[Cancel] GitHub run cancel failed (non-fatal):', ghErr.message);
-    }
-
-    res.json({ success: true, status: 'cancelled' });
-  } catch (err) {
-    console.error('[Cancel Build]', err.message);
-    res.status(500).json({ error: 'Failed to cancel build' });
   }
 });
 
