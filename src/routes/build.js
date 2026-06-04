@@ -10,7 +10,7 @@ const router = express.Router();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ─── DEDUCT CREDITS ───────────────────────────────────────
-async function deductCredits(uid, amount, reason) {
+async function deductCredits(uid, amount, reason, txType = 'build') {
   const db = getDB();
   const ref = db.collection('users').doc(uid);
   await db.runTransaction(async (t) => {
@@ -19,7 +19,7 @@ async function deductCredits(uid, amount, reason) {
     if (current < amount) throw new Error('Insufficient credits');
     t.update(ref, { credits: current - amount, updatedAt: new Date() });
     t.set(db.collection('transactions').doc(), {
-      uid, type: 'debit', amount, reason, createdAt: new Date()
+      uid, type: 'debit', amount, reason, txType, createdAt: new Date()
     });
   });
 }
@@ -152,17 +152,23 @@ router.post('/start', requireAuth, async (req, res) => {
       updatedAt: new Date()
     };
 
+    // Keystore metadata — hamesha fresh save karo
+    const ksMeta = { cn: ksCN, org: ksOrg, country: ksCountry };
+
     if (existingBuildId) {
-      // Existing entry update karo — naya entry nahi banega
+      // Existing entry update karo — htmlCode + keystore metadata bhi update hoga
       await db.collection('builds').doc(existingBuildId).update({
         ...buildData,
+        ...ksMeta,
+        htmlCode,   // Latest HTML hamesha save karo
         // createdAt preserve karo — sirf updatedAt change hoga
       });
     } else {
-      // Pehli baar — naya entry banao + htmlCode save karo
+      // Pehli baar — naya entry banao
       await db.collection('builds').doc(buildId).set({
         ...buildData,
-        htmlCode,   // 1st build ka HTML Firestore mein save
+        ...ksMeta,
+        htmlCode,
         createdAt: new Date()
       });
     }
@@ -206,6 +212,10 @@ async function getOrCreateKeystore(packageName, ksParams) {
       alias:          d.alias,
       storePassword:  d.storePassword,
       keyPassword:    d.keyPassword,
+      cn:             d.cn      || ksParams.cn      || '',
+      org:            d.org     || ksParams.org     || '',
+      country:        d.country || ksParams.country || 'IN',
+      appName:        d.appName || '',
       isNew:          false
     };
   }
@@ -273,14 +283,34 @@ async function saveKeystoreFromArtifact(packageName, repoName, runId, ksResult) 
       return;
     }
 
-    // 4. Firestore mein permanently save karo
+    // 4. builds doc se htmlCode + appName lo
+    let savedHtmlCode = '';
+    let savedAppName  = '';
+    try {
+      const bSnap = await db.collection('builds')
+        .where('packageName', '==', packageName)
+        .limit(1).get();
+      if (!bSnap.empty) {
+        const bd = bSnap.docs[0].data();
+        savedHtmlCode = bd.htmlCode  || '';
+        savedAppName  = bd.appName   || '';
+      }
+    } catch(e) { console.warn('[Keystore] builds fetch for appName failed:', e.message); }
+
+    // 5. Firestore mein permanently save karo — poori signing identity
     await db.collection('keystores').doc(packageName).set({
       keystoreBase64,
       alias:         ksResult.alias,
       storePassword: ksResult.storePassword,
       keyPassword:   ksResult.keyPassword,
+      cn:            ksResult.cn      || '',
+      org:           ksResult.org     || '',
+      country:       ksResult.country || 'IN',
+      appName:       savedAppName,
+      htmlCode:      savedHtmlCode,
       packageName,
-      savedAt:       new Date()
+      savedAt:       new Date(),
+      updatedAt:     new Date()
     });
 
     console.log(`[Keystore] ✅ Saved to Firestore for ${packageName} (${keystoreBase64.length} chars)`);
@@ -384,8 +414,23 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
       totalBuilds: admin.firestore.FieldValue.increment(1)
     });
 
-    // APK generate hone ke baad keystore artifact se Firestore mein save karo
+    // APK generate hone ke baad keystore artifact se Firestore mein save karo (new keystore)
     await saveKeystoreFromArtifact(config.packageName, repoName, runId, ksResult);
+
+    // Existing keystore case: htmlCode + appName update karo (saveKeystoreFromArtifact sirf isNew pe chalta hai)
+    if (!ksResult.isNew) {
+      try {
+        const db2 = getDB();
+        await db2.collection('keystores').doc(config.packageName).update({
+          htmlCode:  config.htmlCode  || '',
+          appName:   config.appName   || '',
+          updatedAt: new Date()
+        });
+        console.log(`[Keystore] htmlCode updated for existing keystore: ${config.packageName}`);
+      } catch(e) {
+        console.warn('[Keystore] htmlCode update failed (non-fatal):', e.message);
+      }
+    }
 
   } catch (err) {
     await log(`Build failed: ${err.message}`, -1);
@@ -431,6 +476,65 @@ async function pollForRun(repoName, buildId, db) {
   }
   throw new Error('Build timed out after 10 minutes');
 }
+
+
+// ─── GET /api/build/signing-profile/:pkg ─────────────────
+// Package name se keystore + htmlCode fetch — update app auto-fill ke liye
+router.get('/signing-profile/:pkg', requireAuth, async (req, res) => {
+  const pkg = decodeURIComponent(req.params.pkg || '').trim();
+  if (!pkg || !pkg.includes('.'))
+    return res.status(400).json({ error: 'Valid package name required' });
+
+  try {
+    const db  = getDB();
+
+    // 1. keystores collection — primary source
+    const ksDoc = await db.collection('keystores').doc(pkg).get();
+
+    // 2. builds collection — uid-specific htmlCode (latest)
+    let htmlCode = '';
+    let appName  = '';
+    try {
+      const bSnap = await db.collection('builds')
+        .where('uid',         '==', req.user.uid)
+        .where('packageName', '==', pkg)
+        .limit(1)
+        .get();
+      if (!bSnap.empty) {
+        const bd = bSnap.docs[0].data();
+        htmlCode = bd.htmlCode || '';
+        appName  = bd.appName  || '';
+      }
+    } catch(e) {
+      console.warn('[SigningProfile] builds fetch failed:', e.message);
+    }
+
+    // Kuch bhi nahi mila
+    if (!ksDoc.exists && !htmlCode) {
+      return res.json({ found: false });
+    }
+
+    const ks = ksDoc.exists ? ksDoc.data() : {};
+
+    // htmlCode priority: keystores > builds (keystores mein latest hota hai)
+    const finalHtml = ks.htmlCode || htmlCode || '';
+
+    res.json({
+      found:         true,
+      alias:         ks.alias         || 'release',
+      storePassword: ks.storePassword || '',
+      keyPassword:   ks.keyPassword   || '',
+      cn:            ks.cn            || '',
+      org:           ks.org           || '',
+      country:       ks.country       || 'IN',
+      appName:       ks.appName       || appName || '',
+      htmlCode:      finalHtml
+    });
+  } catch (err) {
+    console.error('[SigningProfile]', err.message);
+    res.status(500).json({ error: 'Failed to fetch signing profile' });
+  }
+});
 
 // ─── GET /api/build/download/:id ─────────────────────────
 // Proxies GitHub artifact zip download to user
@@ -557,6 +661,74 @@ router.get('/:id', requireAuth, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch build status' });
+  }
+});
+
+
+// ─── DELETE /api/build/:id ───────────────────────────────
+router.delete('/:id', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const db  = getDB();
+    const doc = await db.collection('builds').doc(id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Build not found' });
+    const data = doc.data();
+    if (data.uid !== req.user.uid)
+      return res.status(403).json({ error: 'Access denied' });
+    const deletable = ['failed', 'cancelled'];
+    if (!deletable.includes(data.status))
+      return res.status(400).json({ error: 'Only failed or cancelled builds can be deleted' });
+    await db.collection('builds').doc(id).delete();
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Delete Build]', err.message);
+    res.status(500).json({ error: 'Failed to delete build' });
+  }
+});
+
+// ─── POST /api/build/:id/cancel ──────────────────────────
+router.post('/:id/cancel', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const db  = getDB();
+    const doc = await db.collection('builds').doc(id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Build not found' });
+    const data = doc.data();
+    if (data.uid !== req.user.uid)
+      return res.status(403).json({ error: 'Access denied' });
+    const cancellable = ['queued', 'building', 'processing'];
+    if (!cancellable.includes(data.status))
+      return res.status(400).json({ error: 'Build already completed or cancelled' });
+    await db.collection('builds').doc(id).update({
+      status:    'cancelled',
+      updatedAt: new Date(),
+      logs:      admin.firestore.FieldValue.arrayUnion(
+        `[${new Date().toLocaleTimeString()}] Build cancelled by user`
+      )
+    });
+    // GitHub Actions run cancel karo (best-effort)
+    try {
+      const repoName = data.repoName;
+      if (repoName) {
+        const run = await github.getLatestRun(repoName);
+        if (run?.id) {
+          const axios    = require('axios');
+          const GH_TOKEN = process.env.GITHUB_TOKEN;
+          const GH_OWNER = process.env.GITHUB_USERNAME;
+          await axios.post(
+            `https://api.github.com/repos/${GH_OWNER}/${repoName}/actions/runs/${run.id}/cancel`,
+            {},
+            { headers: { Authorization: `Bearer ${GH_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } }
+          );
+        }
+      }
+    } catch (ghErr) {
+      console.warn('[Cancel] GitHub run cancel failed (non-fatal):', ghErr.message);
+    }
+    res.json({ success: true, status: 'cancelled' });
+  } catch (err) {
+    console.error('[Cancel Build]', err.message);
+    res.status(500).json({ error: 'Failed to cancel build' });
   }
 });
 
