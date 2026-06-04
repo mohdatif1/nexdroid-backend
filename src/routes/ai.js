@@ -687,24 +687,31 @@ router.post('/prd-templates/:category', requireAuth, async (req, res) => {
 router.get('/prd-history', requireAuth, async (req, res) => {
   const db = getDB();
   try {
+    // orderBy hataaya — composite index ki zarurat nahi ab
     const snap = await db.collection('prd_history')
       .where('uid', '==', req.user.uid)
-      .orderBy('createdAt', 'desc')
       .limit(20)
       .get();
 
-    const history = snap.docs.map(d => {
-      const data = d.data();
-      return {
-        id:        d.id,
-        appName:   data.appName   || 'Untitled',
-        category:  data.category  || 'utility',
-        theme:     data.theme     || 'dark',
-        wordCount: data.wordCount || 0,
-        prd:       data.prd       || '',
-        createdAt: data.createdAt
-      };
-    });
+    const history = snap.docs
+      .map(d => {
+        const data = d.data();
+        return {
+          id:        d.id,
+          appName:   data.appName   || 'Untitled',
+          category:  data.category  || 'utility',
+          theme:     data.theme     || 'dark',
+          wordCount: data.wordCount || 0,
+          prd:       data.prd       || '',
+          createdAt: data.createdAt
+        };
+      })
+      // JS mein sort karo — latest pehle
+      .sort((a, b) => {
+        const ta = a.createdAt?._seconds ?? (a.createdAt ? new Date(a.createdAt).getTime()/1000 : 0);
+        const tb = b.createdAt?._seconds ?? (b.createdAt ? new Date(b.createdAt).getTime()/1000 : 0);
+        return tb - ta;
+      });
 
     res.json({ success: true, history });
   } catch (err) {
