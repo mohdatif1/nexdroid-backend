@@ -1,111 +1,500 @@
 const express = require('express');
-const { requireAuth, requireAuthOrNew } = require('../middleware/auth');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { getDB } = require('../services/firebase');
 
 const router = express.Router();
 
-// ─── POST /api/auth/register ──────────────────────────────
-// requireAuthOrNew — token verify karo but user na ho to bhi allow karo
-router.post('/register', requireAuthOrNew, async (req, res) => {
-  const { uid, email, name: tokenName } = req.user;
+// All admin routes require auth + admin role
+router.use(requireAuth, requireAdmin);
+
+// ─── GET /api/admin/stats ─────────────────────────────────
+router.get('/stats', async (req, res) => {
   const db = getDB();
-
   try {
-    const ref = db.collection('users').doc(uid);
-    const existing = await ref.get();
+    const [usersSnap, buildsSnap, txnSnap] = await Promise.all([
+      db.collection('users').count().get(),
+      db.collection('builds').count().get(),
+      db.collection('transactions').where('type', '==', 'credit').get()
+    ]);
 
-    if (existing.exists) {
-      console.log('[Register] User already exists:', uid);
-      return res.json({
-        success: true,
-        user: { uid, email, ...existing.data() }
-      });
-    }
+    const totalRevenue = txnSnap.docs.reduce((sum, d) => {
+      const data = d.data();
+      return sum + (data.paidAmount || 0);
+    }, 0);
 
-    // New user — signup bonus Firestore se fetch karo (default 15)
-    let signupBonus = 15;
-    try {
-      const pricingDoc = await db.collection('appConfig').doc('creditPricing').get();
-      if (pricingDoc.exists && typeof pricingDoc.data().signupBonus === 'number') {
-        signupBonus = pricingDoc.data().signupBonus;
-      }
-    } catch (e) {
-      console.warn('[Register] Could not fetch signupBonus, using default 15');
-    }
-
-    const userData = {
-      uid,
-      email,
-      name: req.body.name || tokenName || email.split('@')[0],
-      credits: signupBonus,
-      totalBuilds: 0,
-      aiGenerated: 0,
-      isAdmin: false,
-      plan: 'free',
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-
-    await ref.set(userData);
-
-    // Signup bonus transaction log
-    await db.collection('transactions').doc().set({
-      uid,
-      type:      'credit',
-      planName:  'Signup Bonus',
-      credits:   signupBonus,
-      isDebit:   false,
-      status:    'approved',
-      createdAt: new Date()
+    res.json({
+      totalUsers: usersSnap.data().count,
+      totalBuilds: buildsSnap.data().count,
+      totalRevenue
     });
-
-    console.log(`[Register] New user created: ${uid} — ${signupBonus} credits given`);
-    res.json({ success: true, user: userData });
-
   } catch (err) {
-    console.error('[Auth Register]', err.message);
-    res.status(500).json({ error: 'Registration failed: ' + err.message });
+    res.status(500).json({ error: 'Failed to fetch stats' });
   }
 });
 
-// ─── GET /api/auth/me ─────────────────────────────────────
-router.get('/me', requireAuth, async (req, res) => {
-  const data = req.userData;
-  res.json({
-    uid: req.user.uid,
-    email: req.user.email,
-    name: data.name,
-    credits: data.credits || 0,
-    totalBuilds: data.totalBuilds || 0,
-    aiGenerated: data.aiGenerated || 0,
-    plan: data.plan || 'free',
-    isAdmin: data.isAdmin || false
-  });
+// ─── GET /api/admin/users ─────────────────────────────────
+router.get('/users', async (req, res) => {
+  const db = getDB();
+  try {
+    const snap = await db.collection('users')
+      .orderBy('createdAt', 'desc')
+      .limit(50)
+      .get();
+
+    const users = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.json({ users });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
 });
 
-// ─── GET /api/auth/credits ────────────────────────────────
-router.get('/credits', requireAuth, async (req, res) => {
-  res.json({ credits: req.userData.credits || 0 });
+// ─── POST /api/admin/add-credits ──────────────────────────
+router.post('/add-credits', async (req, res) => {
+  const { uid, amount, reason } = req.body;
+  if (!uid || !amount || amount <= 0) {
+    return res.status(400).json({ error: 'Invalid uid or amount' });
+  }
+  const db = getDB();
+  try {
+    const ref = db.collection('users').doc(uid);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'User not found' });
+
+    const current = doc.data().credits || 0;
+    await ref.update({ credits: current + amount, updatedAt: new Date() });
+    await db.collection('transactions').doc().set({
+      uid,
+      type:      'credit',
+      planName:  reason || 'Admin Added Credits',
+      credits:   Number(amount),
+      isDebit:   false,
+      status:    'approved',
+      addedBy:   req.user.uid,
+      createdAt: new Date()
+    });
+
+    res.json({ success: true, newBalance: current + amount });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to add credits' });
+  }
 });
 
-// ─── GET /api/auth/transactions ───────────────────────────
-router.get('/transactions', requireAuth, async (req, res) => {
+// ─── POST /api/admin/subtract-credits ─────────────────────
+router.post('/subtract-credits', async (req, res) => {
+  const { uid, amount, reason } = req.body;
+  if (!uid || !amount || amount <= 0)
+    return res.status(400).json({ error: 'Invalid uid or amount' });
+  const db = getDB();
+  try {
+    const ref = db.collection('users').doc(uid);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'User not found' });
+
+    const current = doc.data().credits || 0;
+    const newBal  = Math.max(0, current - amount);
+    await ref.update({ credits: newBal, updatedAt: new Date() });
+    await db.collection('transactions').doc().set({
+      uid,
+      type:      'debit',
+      planName:  reason || 'Admin Deducted Credits',
+      credits:   Number(amount),
+      isDebit:   true,
+      status:    'approved',
+      addedBy:   req.user.uid,
+      createdAt: new Date()
+    });
+
+    res.json({ success: true, newBalance: newBal });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to subtract credits' });
+  }
+});
+
+// ─── POST /api/admin/set-credits ──────────────────────────
+router.post('/set-credits', async (req, res) => {
+  const { uid, amount, reason } = req.body;
+  if (!uid || typeof amount !== 'number' || amount < 0)
+    return res.status(400).json({ error: 'Invalid uid or amount' });
+  const db = getDB();
+  try {
+    const ref = db.collection('users').doc(uid);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'User not found' });
+
+    const current = doc.data().credits || 0;
+    const diff    = amount - current; // positive = add, negative = deduct
+    await ref.update({ credits: amount, updatedAt: new Date() });
+    await db.collection('transactions').doc().set({
+      uid,
+      type:      diff >= 0 ? 'credit' : 'debit',
+      planName:  reason || `Admin Set Credits (${diff >= 0 ? '+' : ''}${diff})`,
+      credits:   Math.abs(diff),
+      isDebit:   diff < 0,
+      status:    'approved',
+      addedBy:   req.user.uid,
+      createdAt: new Date()
+    });
+
+    res.json({ success: true, newBalance: amount });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to set credits' });
+  }
+});
+
+// ─── GET /api/admin/builds ────────────────────────────────
+router.get('/builds', async (req, res) => {
+  const db = getDB();
+  try {
+    const snap = await db.collection('builds')
+      .orderBy('createdAt', 'desc')
+      .limit(50)
+      .get();
+
+    const builds = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.json({ builds });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch builds' });
+  }
+});
+
+// ─── GET /api/admin/plans ─────────────────────────────────
+router.get('/plans', async (req, res) => {
+  const db = getDB();
+  try {
+    const snap = await db.collection('plans').orderBy('createdAt', 'asc').get();
+    const plans = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.json({ plans });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch plans' });
+  }
+});
+
+// ─── POST /api/admin/plans ────────────────────────────────
+router.post('/plans', async (req, res) => {
+  const { name, price, credits } = req.body;
+  if (!name || price === undefined || !credits || credits < 1) {
+    return res.status(400).json({ error: 'name, price, and credits are required' });
+  }
+  const db = getDB();
+  try {
+    const ref = await db.collection('plans').add({
+      name,
+      price: Number(price),
+      credits: Number(credits),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      createdBy: req.user.uid
+    });
+    res.json({ success: true, id: ref.id });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create plan' });
+  }
+});
+
+// ─── PUT /api/admin/plans/:planId ─────────────────────────
+router.put('/plans/:planId', async (req, res) => {
+  const { planId } = req.params;
+  const { name, price, credits } = req.body;
+  if (!name || price === undefined || !credits || credits < 1) {
+    return res.status(400).json({ error: 'name, price, and credits are required' });
+  }
+  const db = getDB();
+  try {
+    const ref = db.collection('plans').doc(planId);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Plan not found' });
+    await ref.update({
+      name,
+      price: Number(price),
+      credits: Number(credits),
+      updatedAt: new Date(),
+      updatedBy: req.user.uid
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update plan' });
+  }
+});
+
+// ─── DELETE /api/admin/plans/:planId ──────────────────────
+router.delete('/plans/:planId', async (req, res) => {
+  const { planId } = req.params;
+  const db = getDB();
+  try {
+    const ref = db.collection('plans').doc(planId);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Plan not found' });
+    await ref.delete();
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete plan' });
+  }
+});
+
+// ─── GET /api/admin/transactions ──────────────────────────
+router.get('/transactions', async (req, res) => {
   const db = getDB();
   try {
     const snap = await db.collection('transactions')
-      .where('uid', '==', req.user.uid)
       .orderBy('createdAt', 'desc')
-      .limit(20)
+      .limit(100)
       .get();
 
-    const txns = snap.docs.map(d => ({
-      id: d.id,
-      ...d.data(),
-      createdAt: d.data().createdAt?.toDate?.() || d.data().createdAt
+    // User info bhi saath laao
+    const txns = await Promise.all(snap.docs.map(async d => {
+      const data = d.data();
+      let userName = '', userEmail = '';
+      try {
+        const uDoc = await db.collection('users').doc(data.uid).get();
+        if (uDoc.exists) {
+          userName  = uDoc.data().name  || uDoc.data().displayName || '';
+          userEmail = uDoc.data().email || '';
+        }
+      } catch(e) {}
+      return { id: d.id, ...data, userName, userEmail };
     }));
+
     res.json({ transactions: txns });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+// ─── POST /api/admin/reject-payment ──────────────────────
+router.post('/reject-payment', async (req, res) => {
+  const { txnId, reason } = req.body;
+  if (!txnId) return res.status(400).json({ error: 'txnId required' });
+  const db = getDB();
+  try {
+    const ref = db.collection('transactions').doc(txnId);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Transaction not found' });
+    await ref.update({
+      status: 'rejected',
+      rejectedBy: req.user.uid,
+      rejectedAt: new Date(),
+      rejectReason: reason || 'Rejected by admin'
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to reject payment' });
+  }
+});
+
+// ─── POST /api/admin/approve-payment ─────────────────────
+router.post('/approve-payment', async (req, res) => {
+  const { txnId, uid, credits, paidAmount } = req.body;
+  if (!txnId || !uid || !credits) {
+    return res.status(400).json({ error: 'Missing fields' });
+  }
+  const db = getDB();
+  try {
+    const ref = db.collection('users').doc(uid);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'User not found' });
+
+    const current = doc.data().credits || 0;
+    await ref.update({ credits: current + credits, updatedAt: new Date() });
+    await db.collection('transactions').doc(txnId).update({
+      status: 'approved',
+      approvedBy: req.user.uid,
+      approvedAt: new Date(),
+      paidAmount: paidAmount || 0
+    });
+
+    res.json({ success: true, newBalance: current + credits });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to approve payment' });
+  }
+});
+
+// ─── GET /api/admin/settings ──────────────────────────────
+router.get('/settings', async (req, res) => {
+  const db = getDB();
+  try {
+    const [payDoc, aiDoc] = await Promise.all([
+      db.collection('settings').doc('payment').get(),
+      db.collection('settings').doc('ai').get()
+    ]);
+    const pay = payDoc.exists ? payDoc.data() : {};
+    const ai  = aiDoc.exists  ? aiDoc.data()  : {};
+    res.json({
+      upiId:             pay.upiId             || '',
+      qrImageUrl:        pay.qrImageUrl        || '',
+      masterPrompt:      ai.masterPrompt       || '',
+      safetyPrompt:      ai.safetyPrompt       || '',
+      blockedKeywords:   ai.blockedKeywords    || [],
+      blockedCategories: ai.blockedCategories  || [],
+      violationAction:   ai.violationAction    || 'block',
+      adminEmails:       ai.adminEmails        || []
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
+// ─── PUT/POST /api/admin/settings ─────────────────────────
+// Handles both payment settings AND AI/safety settings
+async function handleSaveSettings(req, res) {
+  const {
+    upiId, qrImageUrl,
+    masterPrompt, safetyPrompt,
+    blockedKeywords, blockedCategories,
+    violationAction, adminEmails
+  } = req.body;
+
+  const db = getDB();
+  try {
+    const batch = db.batch();
+
+    // Payment settings
+    const payUpdate = { updatedAt: new Date(), updatedBy: req.user.uid };
+    if (upiId        !== undefined) payUpdate.upiId        = upiId;
+    if (qrImageUrl   !== undefined) payUpdate.qrImageUrl   = qrImageUrl;
+    if (Object.keys(payUpdate).length > 2) {
+      batch.set(db.collection('settings').doc('payment'), payUpdate, { merge: true });
+    }
+
+    // AI / Safety settings
+    const aiUpdate = { updatedAt: new Date(), updatedBy: req.user.uid };
+    if (masterPrompt      !== undefined) aiUpdate.masterPrompt      = masterPrompt;
+    if (safetyPrompt      !== undefined) aiUpdate.safetyPrompt      = safetyPrompt;
+    if (blockedKeywords   !== undefined) aiUpdate.blockedKeywords   = blockedKeywords;
+    if (blockedCategories !== undefined) aiUpdate.blockedCategories = blockedCategories;
+    if (violationAction   !== undefined) aiUpdate.violationAction   = violationAction;
+    if (adminEmails       !== undefined) aiUpdate.adminEmails       = adminEmails;
+    if (Object.keys(aiUpdate).length > 2) {
+      batch.set(db.collection('settings').doc('ai'), aiUpdate, { merge: true });
+    }
+
+    await batch.commit();
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Settings Save]', err.message);
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+}
+
+router.put('/settings',  handleSaveSettings);
+router.post('/settings', handleSaveSettings);
+
+// ─── POST /api/admin/log-violation ────────────────────────
+router.post('/log-violation', async (req, res) => {
+  const { userId, input, reason, ts } = req.body;
+  const db = getDB();
+  try {
+    await db.collection('violations').add({
+      userId:    userId    || req.user.uid,
+      input:     input     || '',
+      reason:    reason    || '',
+      ts:        ts        || Date.now(),
+      reportedBy: req.user.uid,
+      createdAt: new Date()
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Log Violation]', err.message);
+    res.status(500).json({ error: 'Failed to log violation' });
+  }
+});
+
+// ─── GET /api/admin/violations ────────────────────────────
+router.get('/violations', async (req, res) => {
+  const db = getDB();
+  try {
+    const snap = await db.collection('violations')
+      .orderBy('createdAt', 'desc')
+      .limit(100)
+      .get();
+    const violations = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.json({ violations });
+  } catch (err) {
+    console.error('[Violations]', err.message);
+    res.status(500).json({ error: 'Failed to fetch violations' });
+  }
+});
+
+// ─── DELETE /api/admin/delete-payment ─────────────────────
+router.delete('/delete-payment', async (req, res) => {
+  const { txnId } = req.body;
+  if (!txnId) return res.status(400).json({ error: 'txnId required' });
+  const db = getDB();
+  try {
+    const ref = db.collection('transactions').doc(txnId);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Transaction not found' });
+    await ref.delete();
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Delete Payment]', err.message);
+    res.status(500).json({ error: 'Failed to delete payment' });
+  }
+});
+
+// ─── DELETE /api/admin/delete-payments-bulk ───────────────
+router.delete('/delete-payments-bulk', async (req, res) => {
+  const { txnIds } = req.body;
+  if (!txnIds || !Array.isArray(txnIds) || txnIds.length === 0)
+    return res.status(400).json({ error: 'txnIds array required' });
+  if (txnIds.length > 100)
+    return res.status(400).json({ error: 'Max 100 transactions per bulk delete' });
+
+  const db = getDB();
+  try {
+    const batch = db.batch();
+    txnIds.forEach(id => {
+      batch.delete(db.collection('transactions').doc(id));
+    });
+    await batch.commit();
+    res.json({ success: true, deleted: txnIds.length });
+  } catch (err) {
+    console.error('[Bulk Delete Payments]', err.message);
+    res.status(500).json({ error: 'Failed to bulk delete payments' });
+  }
+});
+
+
+// ─── GET /api/admin/credit-pricing ───────────────────────
+router.get('/credit-pricing', async (req, res) => {
+  const db = getDB();
+  try {
+    const doc = await db.collection('appConfig').doc('creditPricing').get();
+    if (!doc.exists) return res.json({ newBuild: 5, update: 3, prd: 1, signupBonus: 15 });
+    const d = doc.data();
+    res.json({
+      newBuild:     d.newBuild     ?? 5,
+      update:       d.update       ?? 3,
+      prd:          d.prd          ?? 1,
+      signupBonus:  d.signupBonus  ?? 15
+    });
+  } catch (err) {
+    console.error('[CreditPricing GET]', err.message);
+    res.status(500).json({ error: 'Failed to fetch credit pricing' });
+  }
+});
+
+// ─── PUT /api/admin/credit-pricing ───────────────────────
+router.put('/credit-pricing', async (req, res) => {
+  const { newBuild, update, prd, signupBonus } = req.body;
+  if (
+    typeof newBuild    !== 'number' || newBuild    < 1 ||
+    typeof update      !== 'number' || update      < 1 ||
+    typeof prd         !== 'number' || prd         < 1 ||
+    typeof signupBonus !== 'number' || signupBonus < 0
+  ) {
+    return res.status(400).json({ error: 'Invalid values — minimum 1 credit required (signupBonus min 0)' });
+  }
+  const db = getDB();
+  try {
+    await db.collection('appConfig').doc('creditPricing').set({
+      newBuild, update, prd, signupBonus,
+      updatedAt: new Date(),
+      updatedBy: req.user.uid
+    }, { merge: true });
+    res.json({ success: true, newBuild, update, prd, signupBonus });
+  } catch (err) {
+    console.error('[CreditPricing PUT]', err.message);
+    res.status(500).json({ error: 'Failed to save credit pricing' });
   }
 });
 
