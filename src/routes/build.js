@@ -536,4 +536,62 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ─── POST /api/build/:id/cancel ──────────────────────────
+router.post('/:id/cancel', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const db  = getDB();
+    const doc = await db.collection('builds').doc(id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Build not found' });
+
+    const data = doc.data();
+    if (data.uid !== req.user.uid)
+      return res.status(403).json({ error: 'Access denied' });
+
+    const cancellable = ['queued', 'building', 'processing'];
+    if (!cancellable.includes(data.status))
+      return res.status(400).json({ error: 'Build already completed or cancelled' });
+
+    await db.collection('builds').doc(id).update({
+      status:    'cancelled',
+      updatedAt: new Date(),
+      logs:      admin.firestore.FieldValue.arrayUnion(
+        `[${new Date().toLocaleTimeString()}] Build cancelled by user`
+      )
+    });
+
+    // GitHub Actions run cancel karo (best-effort, non-blocking)
+    try {
+      const repoName = data.repoName;
+      if (repoName) {
+        const run = await github.getLatestRun(repoName);
+        if (run?.id) {
+          const GH_TOKEN = process.env.GITHUB_TOKEN;
+          const GH_OWNER = process.env.GITHUB_USERNAME;
+          const axios = require('axios');
+          await axios.post(
+            `https://api.github.com/repos/${GH_OWNER}/${repoName}/actions/runs/${run.id}/cancel`,
+            {},
+            {
+              headers: {
+                Authorization: `Bearer ${GH_TOKEN}`,
+                Accept: 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28'
+              }
+            }
+          );
+          console.log(`[Cancel] GitHub run ${run.id} cancel request sent`);
+        }
+      }
+    } catch (ghErr) {
+      console.warn('[Cancel] GitHub run cancel failed (non-fatal):', ghErr.message);
+    }
+
+    res.json({ success: true, status: 'cancelled' });
+  } catch (err) {
+    console.error('[Cancel Build]', err.message);
+    res.status(500).json({ error: 'Failed to cancel build' });
+  }
+});
+
 module.exports = router;
