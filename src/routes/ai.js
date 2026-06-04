@@ -7,7 +7,42 @@ const { getDB } = require('../services/firebase');
 const router = express.Router();
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
-// ─── HELPER: Call Groq ────────────────────────────────────
+// ─── DYNAMIC CREDIT COST ──────────────────────────────────
+const PRICING_DEFAULTS = { newBuild: 5, update: 3, prd: 1 };
+
+async function getCreditCost(type) {
+  try {
+    const db = getDB();
+    const doc = await db.collection('appConfig').doc('creditPricing').get();
+    if (doc.exists) {
+      const val = doc.data()[type];
+      if (typeof val === 'number' && val >= 1) return val;
+    }
+  } catch (e) {
+    console.warn('[CreditCost] Firestore fetch failed, using default:', e.message);
+  }
+  return PRICING_DEFAULTS[type] ?? 1;
+}
+
+async function deductCredits(uid, amount, reason, txType = 'prd') {
+  const db = getDB();
+  const ref = db.collection('users').doc(uid);
+  await db.runTransaction(async (t) => {
+    const doc  = await t.get(ref);
+    const current = doc.data().credits || 0;
+    if (current < amount) throw new Error('Insufficient credits');
+    t.update(ref, { credits: current - amount, updatedAt: new Date() });
+    t.set(db.collection('transactions').doc(), {
+      uid,
+      type:      txType,
+      planName:  reason,
+      credits:   amount,
+      isDebit:   true,
+      status:    'approved',
+      createdAt: new Date()
+    });
+  });
+}
 async function callGroq(systemPrompt, userMessage, jsonMode = false) {
   const body = {
     model: 'llama-3.3-70b-versatile',
@@ -395,7 +430,7 @@ VISUAL POLISH (every app must have):
 });
 
 // ─── POST /api/ai/generate-prd ───────────────────────────
-router.post('/generate-prd', requireAuth, requireCredits(1), async (req, res) => {
+router.post('/generate-prd', requireAuth, async (req, res) => {
   const {
     appName,
     category      = 'custom',
@@ -412,6 +447,15 @@ router.post('/generate-prd', requireAuth, requireCredits(1), async (req, res) =>
     return res.status(400).json({ error: 'App ka naam do please' });
 
   try {
+    // 0. Dynamic credit cost fetch karo
+    const prdCost = await getCreditCost('prd');
+    const db = getDB();
+    const userDoc = await db.collection('users').doc(req.user.uid).get();
+    const userCredits = userDoc.exists ? (userDoc.data().credits || 0) : 0;
+    if (userCredits < prdCost) {
+      return res.status(402).json({ error: `Insufficient credits. ${prdCost} credits chahiye PRD generate karne ke liye.` });
+    }
+
     // 1. Fetch admin settings
     const settings = await fetchAiSettings();
 
@@ -502,11 +546,10 @@ The PRD must include:
     if (!prd || prd.length < 100)
       return res.status(500).json({ error: 'PRD generation failed. Please try again.' });
 
-    // 8. Deduct 1 credit
-    await deductCredits(req.user.uid, 1, 'PRD generation');
+    // 8. Deduct credits dynamically
+    await deductCredits(req.user.uid, prdCost, 'PRD generation', 'prd');
 
     // 9. Firestore mein aiGenerated increment karo
-    const db = getDB();
     const userRef = db.collection('users').doc(req.user.uid);
     await userRef.update({
       aiGenerated: admin.firestore.FieldValue.increment(1)
@@ -514,17 +557,12 @@ The PRD must include:
     const updatedUser = await userRef.get();
     const aiGenerated = updatedUser.data().aiGenerated || 1;
 
-    // 10. PRD history Firestore mein save karo
+    // 10. PRD history save karo
     try {
       await db.collection('prd_history').add({
         uid:       req.user.uid,
         appName:   appName.trim(),
-        category,
-        theme,
-        authType,
-        storageType,
-        features,
-        downloadEnabled,
+        category, theme, authType, storageType, features, downloadEnabled,
         extraNotes: extraNotes || '',
         wordCount:  prd.split(/\s+/).length,
         prd,
@@ -534,7 +572,7 @@ The PRD must include:
       console.warn('[PRD History] Save failed (non-fatal):', histErr.message);
     }
 
-    res.json({ success: true, prd, creditsUsed: 1, aiGenerated });
+    res.json({ success: true, prd, creditsUsed: prdCost, aiGenerated });
 
   } catch (err) {
     console.error('[PRD Generate]', err.message);
@@ -646,7 +684,6 @@ router.post('/prd-templates/:category', requireAuth, async (req, res) => {
 });
 
 // ─── GET /api/ai/prd-history ──────────────────────────────
-// User ki PRD generation history fetch karo
 router.get('/prd-history', requireAuth, async (req, res) => {
   const db = getDB();
   try {
@@ -659,13 +696,13 @@ router.get('/prd-history', requireAuth, async (req, res) => {
     const history = snap.docs.map(d => {
       const data = d.data();
       return {
-        id:          d.id,
-        appName:     data.appName     || 'Untitled',
-        category:    data.category    || 'utility',
-        theme:       data.theme       || 'dark',
-        wordCount:   data.wordCount   || 0,
-        prd:         data.prd         || '',
-        createdAt:   data.createdAt
+        id:        d.id,
+        appName:   data.appName   || 'Untitled',
+        category:  data.category  || 'utility',
+        theme:     data.theme     || 'dark',
+        wordCount: data.wordCount || 0,
+        prd:       data.prd       || '',
+        createdAt: data.createdAt
       };
     });
 
