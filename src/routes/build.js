@@ -536,6 +536,30 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ─── DELETE /api/build/:id ───────────────────────────────
+router.delete('/:id', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const db  = getDB();
+    const doc = await db.collection('builds').doc(id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Build not found' });
+
+    const data = doc.data();
+    if (data.uid !== req.user.uid)
+      return res.status(403).json({ error: 'Access denied' });
+
+    const deletable = ['failed', 'cancelled'];
+    if (!deletable.includes(data.status))
+      return res.status(400).json({ error: 'Only failed or cancelled builds can be deleted' });
+
+    await db.collection('builds').doc(id).delete();
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Delete Build]', err.message);
+    res.status(500).json({ error: 'Failed to delete build' });
+  }
+});
+
 // ─── POST /api/build/:id/cancel ──────────────────────────
 router.post('/:id/cancel', requireAuth, async (req, res) => {
   const { id } = req.params;
@@ -560,27 +584,20 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
       )
     });
 
-    // GitHub Actions run cancel karo (best-effort, non-blocking)
+    // GitHub Actions run cancel karo (best-effort)
     try {
       const repoName = data.repoName;
       if (repoName) {
         const run = await github.getLatestRun(repoName);
         if (run?.id) {
+          const axios    = require('axios');
           const GH_TOKEN = process.env.GITHUB_TOKEN;
           const GH_OWNER = process.env.GITHUB_USERNAME;
-          const axios = require('axios');
           await axios.post(
             `https://api.github.com/repos/${GH_OWNER}/${repoName}/actions/runs/${run.id}/cancel`,
             {},
-            {
-              headers: {
-                Authorization: `Bearer ${GH_TOKEN}`,
-                Accept: 'application/vnd.github+json',
-                'X-GitHub-Api-Version': '2022-11-28'
-              }
-            }
+            { headers: { Authorization: `Bearer ${GH_TOKEN}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } }
           );
-          console.log(`[Cancel] GitHub run ${run.id} cancel request sent`);
         }
       }
     } catch (ghErr) {
