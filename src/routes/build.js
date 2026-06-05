@@ -537,7 +537,7 @@ router.get('/signing-profile/:pkg', requireAuth, async (req, res) => {
 });
 
 // ─── GET /api/build/download/:id ─────────────────────────
-// Proxies GitHub artifact zip download to user
+// GitHub artifact ZIP ke andar se APK/AAB extract karke direct download
 router.get('/download/:id', requireAuth, async (req, res) => {
   try {
     const db  = getDB();
@@ -549,31 +549,59 @@ router.get('/download/:id', requireAuth, async (req, res) => {
     if (!data.artifactId || !data.repoName)
       return res.status(404).json({ error: 'File not ready yet' });
 
-    const axios = require('axios');
+    const axios  = require('axios');
+    const AdmZip = require('adm-zip');
     const GH_TOKEN = process.env.GITHUB_TOKEN;
     const GH_OWNER = process.env.GITHUB_USERNAME;
-    const ext = data.aabUrl ? '.aab' : '.apk';
+    const isAAB    = !!data.aabUrl;
+    const ext      = isAAB ? '.aab' : '.apk';
 
+    // App name clean karo — special chars hatao, spaces ko underscore
+    const appName  = (data.appName || 'App')
+      .replace(/[^a-zA-Z0-9 _-]/g, '')
+      .replace(/\s+/g, '_')
+      .trim() || 'App';
+    const version  = (data.versionName || '1.0.0').replace(/[^a-zA-Z0-9._-]/g, '');
+    const fileName = `${appName}_v${version}${ext}`;
+
+    // 1. GitHub se ZIP arraybuffer download karo
     const ghRes = await axios.get(
       `https://api.github.com/repos/${GH_OWNER}/${data.repoName}/actions/artifacts/${data.artifactId}/zip`,
       {
         headers: {
-          Authorization: `Bearer ${GH_TOKEN}`,
-          Accept: 'application/vnd.github+json',
+          Authorization:          `Bearer ${GH_TOKEN}`,
+          Accept:                 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28'
         },
-        responseType: 'stream',
+        responseType: 'arraybuffer',
         maxRedirects: 5
       }
     );
 
-    res.setHeader('Content-Disposition', `attachment; filename="app-release${ext}.zip"`);
-    res.setHeader('Content-Type', 'application/zip');
-    ghRes.data.pipe(res);
+    // 2. ZIP ke andar .apk ya .aab entry dhundho
+    const zip    = new AdmZip(Buffer.from(ghRes.data));
+    const target = zip.getEntries().find(e =>
+      !e.isDirectory && (isAAB ? e.entryName.endsWith('.aab') : e.entryName.endsWith('.apk'))
+    ) || zip.getEntries().find(e => !e.isDirectory);
+
+    if (!target) {
+      return res.status(404).json({ error: `${ext.slice(1).toUpperCase()} file not found in build package` });
+    }
+
+    // 3. APK/AAB buffer seedha send karo — ZIP nahi
+    const fileBuf  = target.getData();
+    const mimeType = isAAB
+      ? 'application/octet-stream'
+      : 'application/vnd.android.package-archive';
+
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Length', fileBuf.length);
+    res.send(fileBuf);
 
   } catch (err) {
     console.error('Download error:', err.message);
-    res.status(500).json({ error: 'Download failed' });
+    res.status(500).json({ error: 'Download failed: ' + err.message });
   }
 });
 
