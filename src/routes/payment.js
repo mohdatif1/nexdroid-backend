@@ -109,4 +109,91 @@ router.get('/transactions', requireAuth, async (req, res) => {
   }
 });
 
+
+// ─── POST /api/payment/submit ─────────────────────────────
+// User transaction ID submit karta hai — admin approval pending
+router.post('/submit', requireAuth, async (req, res) => {
+  const { planName, credits, price, txnRef } = req.body;
+  const uid = req.user.uid;
+
+  if (!txnRef || !txnRef.trim())
+    return res.status(400).json({ error: 'Transaction ID required' });
+  if (!planName || !credits || !price)
+    return res.status(400).json({ error: 'Plan details missing' });
+  if (isNaN(credits) || credits <= 0)
+    return res.status(400).json({ error: 'Invalid credits amount' });
+  if (isNaN(price) || price <= 0)
+    return res.status(400).json({ error: 'Invalid price' });
+
+  const db = getDB();
+  try {
+    // Duplicate txnRef check — same transaction ID dobara submit na ho
+    const dupSnap = await db.collection('transactions')
+      .where('txnRef', '==', txnRef.trim())
+      .limit(1)
+      .get();
+    if (!dupSnap.empty)
+      return res.status(409).json({ error: 'This Transaction ID has already been submitted' });
+
+    // Pending payment save karo
+    const txnDoc = await db.collection('transactions').add({
+      uid,
+      email:     req.user.email || '',
+      type:      'credit',
+      planName:  planName.trim(),
+      credits:   Number(credits),
+      price:     Number(price),
+      txnRef:    txnRef.trim(),
+      isDebit:   false,
+      status:    'pending',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    });
+
+    console.log(`[Payment Submit] uid=${uid} plan=${planName} price=${price} txnRef=${txnRef} docId=${txnDoc.id}`);
+    res.json({ success: true, message: 'Payment submitted successfully. Credits will be added after admin approval.' });
+  } catch (err) {
+    console.error('[Payment Submit]', err.message);
+    res.status(500).json({ error: 'Failed to submit payment. Please try again.' });
+  }
+});
+
+// ─── GET /api/payment/plans ───────────────────────────────
+// Active plans fetch karo
+router.get('/plans', requireAuth, async (req, res) => {
+  const db = getDB();
+  try {
+    const snap = await db.collection('plans')
+      .where('active', '==', true)
+      .orderBy('price', 'asc')
+      .get();
+    const plans = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    res.json({ plans });
+  } catch (err) {
+    // Index missing fallback
+    try {
+      const snap2 = await db.collection('plans').where('active','==',true).get();
+      const plans = snap2.docs.map(d => ({ id: d.id, ...d.data() }))
+        .sort((a,b) => (a.price||0)-(b.price||0));
+      res.json({ plans });
+    } catch(e2) {
+      res.status(500).json({ error: 'Failed to fetch plans' });
+    }
+  }
+});
+
+// ─── GET /api/payment/settings ────────────────────────────
+// UPI ID + QR image URL fetch karo (frontend ke liye)
+router.get('/settings', requireAuth, async (req, res) => {
+  const db = getDB();
+  try {
+    const doc = await db.collection('appConfig').doc('paymentSettings').get();
+    if (!doc.exists) return res.json({ upiId: '', qrImageUrl: '' });
+    const d = doc.data();
+    res.json({ upiId: d.upiId || '', qrImageUrl: d.qrImageUrl || '' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch payment settings' });
+  }
+});
+
 module.exports = router;
