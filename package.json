@@ -17,6 +17,7 @@
     "uuid": "^9.0.0",
     "express-rate-limit": "^7.1.5",
     "adm-zip": "^0.5.10"
+    "nodemailer": "^6.9.14"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
