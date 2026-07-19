@@ -6,23 +6,30 @@
  * FILE LOCATION: put this file at  src/routes/forgotPassword-routes.js
  * (same folder as your other route files: auth.js, build.js, ai.js, etc.)
  *
+ * ⚠️ WHY RESEND INSTEAD OF SMTP/NODEMAILER:
+ *    Render's free tier blocks/times-out outbound SMTP ports (465/587),
+ *    so Gmail SMTP (nodemailer) fails with "Connection timeout / ETIMEDOUT".
+ *    Resend's API works over normal HTTPS (port 443), which is NOT blocked.
+ *
  * WIRING INSTRUCTIONS:
  *
- * 1) Install nodemailer — add "nodemailer" to package.json dependencies
- *    (Render will run npm install automatically on next deploy).
+ * 1) Sign up free at https://resend.com (100 emails/day free, no card needed).
+ *    - Dashboard → API Keys → Create API Key → copy it.
+ *    - For quick testing you can send FROM their sandbox address
+ *      "onboarding@resend.dev" — but it can only send TO the email you
+ *      signed up with on Resend. To send to any user's email, go to
+ *      Dashboard → Domains → add & verify your own domain (takes a few
+ *      minutes, just add the DNS records they show you), then use
+ *      something like "NexDroid <noreply@yourdomain.com>" as the from address.
  *
- * 2) Add these env vars on Render (Dashboard → your service → Environment):
- *      SMTP_HOST=smtp.gmail.com
- *      SMTP_PORT=465
- *      SMTP_USER=youraddress@gmail.com
- *      SMTP_PASS=your16digitGmailAppPassword   (NOT your normal Gmail password —
- *                generate one at https://myaccount.google.com/apppasswords)
- *      SMTP_FROM="NexDroid <youraddress@gmail.com>"
+ * 2) This file uses "axios" to call Resend's API — you already have axios
+ *    in package.json, so no new dependency needed.
  *
- *    (Any SMTP provider works — Gmail, Brevo/Sendinblue, Resend, SendGrid, etc.
- *     Just change SMTP_HOST/PORT accordingly.)
+ * 3) Add these env vars on Render (Dashboard → your service → Environment):
+ *      RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxx
+ *      RESEND_FROM="NexDroid <onboarding@resend.dev>"   (or your verified domain)
  *
- * 3) In src/index.js, add ONE require line next to your other route requires
+ * 4) In src/index.js, add ONE require line next to your other route requires
  *    (aiRoutes, buildRoutes, authRoutes, etc. near the top of the file):
  *
  *      const forgotPasswordRoutes = require('./routes/forgotPassword-routes');
@@ -38,13 +45,12 @@
  *
  *    This mounts:
  *      POST /api/auth/forgot-password/send-otp
-
  *      POST /api/auth/forgot-password/verify-otp
  *      POST /api/auth/forgot-password/reset
  *
  *    which is exactly what NexDroid.html calls.
  *
- * 4) Firestore: no manual setup needed — a `passwordResetOtps` collection is
+ * 5) Firestore: no manual setup needed — a `passwordResetOtps` collection is
  *    created automatically, keyed by lowercased email. Old docs auto-expire
  *    logically (checked on each request) — for real TTL cleanup you can
  *    optionally add a Firestore TTL policy on the `expiresAt` field.
@@ -62,31 +68,43 @@
 
 const express = require('express');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
+const axios = require('axios');
 const admin = require('firebase-admin'); // already initialized elsewhere (e.g. routes/auth.js) — same singleton
 
 const router = express.Router();
 
-  const OTP_TTL_MS = 5 * 60 * 1000;        // 5 minutes
-  const RESET_TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes
-  const MAX_ATTEMPTS = 5;
+const OTP_TTL_MS = 5 * 60 * 1000;        // 5 minutes
+const RESET_TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_ATTEMPTS = 5;
 
-  const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 465),
-    secure: Number(process.env.SMTP_PORT || 465) === 465,
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-  });
+async function sendOtpEmail(toEmail, otp) {
+  await axios.post(
+    'https://api.resend.com/emails',
+    {
+      from: process.env.RESEND_FROM || 'NexDroid <onboarding@resend.dev>',
+      to: [toEmail],
+      subject: `${otp} is your NexDroid password reset code`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:420px;margin:auto;padding:24px;border:1px solid #eee;border-radius:12px">
+          <h2 style="color:#3b7eff;margin-bottom:4px">NexDroid</h2>
+          <p style="color:#333">Aapka password reset OTP:</p>
+          <div style="font-size:32px;font-weight:800;letter-spacing:8px;color:#111;margin:16px 0">${otp}</div>
+          <p style="color:#666;font-size:13px">Ye OTP 5 minute mein expire ho jaayega. Agar aapne ye request nahi ki, is email ko ignore karo.</p>
+        </div>`,
+    },
+    { headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' } }
+  );
+}
 
-  function genOtp() {
-    return String(crypto.randomInt(100000, 999999)); // 6-digit
-  }
-  function hashOtp(otp) {
-    return crypto.createHash('sha256').update(otp).digest('hex');
-  }
-  function genToken() {
-    return crypto.randomBytes(32).toString('hex');
-  }
+function genOtp() {
+  return String(crypto.randomInt(100000, 999999)); // 6-digit
+}
+function hashOtp(otp) {
+  return crypto.createHash('sha256').update(otp).digest('hex');
+}
+function genToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
 
   // ── 1) SEND OTP ──────────────────────────────────────────────────────
   router.post('/send-otp', async (req, res) => {
@@ -118,18 +136,7 @@ const router = express.Router();
           createdAt: Date.now(),
         });
 
-        await transporter.sendMail({
-          from: process.env.SMTP_FROM || process.env.SMTP_USER,
-          to: email,
-          subject: `${otp} is your NexDroid password reset code`,
-          html: `
-            <div style="font-family:Arial,sans-serif;max-width:420px;margin:auto;padding:24px;border:1px solid #eee;border-radius:12px">
-              <h2 style="color:#3b7eff;margin-bottom:4px">NexDroid</h2>
-              <p style="color:#333">Aapka password reset OTP:</p>
-              <div style="font-size:32px;font-weight:800;letter-spacing:8px;color:#111;margin:16px 0">${otp}</div>
-              <p style="color:#666;font-size:13px">Ye OTP 5 minute mein expire ho jaayega. Agar aapne ye request nahi ki, is email ko ignore karo.</p>
-            </div>`,
-        });
+        await sendOtpEmail(email, otp);
       }
 
       // Always respond success-shaped (prevents email enumeration)
