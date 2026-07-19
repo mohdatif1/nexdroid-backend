@@ -3,12 +3,15 @@
  * FORGOT PASSWORD (OTP via Email) — Express routes for NexDroid backend
  * ===========================================================================
  *
- * WIRING INSTRUCTIONS (Node.js / Express + Firebase Admin + Firestore):
+ * FILE LOCATION: put this file at  src/routes/forgotPassword-routes.js
+ * (same folder as your other route files: auth.js, build.js, ai.js, etc.)
  *
- * 1) Install nodemailer:
- *      npm install nodemailer
+ * WIRING INSTRUCTIONS:
  *
- * 2) Add these env vars on Render (Dashboard → Environment):
+ * 1) Install nodemailer — add "nodemailer" to package.json dependencies
+ *    (Render will run npm install automatically on next deploy).
+ *
+ * 2) Add these env vars on Render (Dashboard → your service → Environment):
  *      SMTP_HOST=smtp.gmail.com
  *      SMTP_PORT=465
  *      SMTP_USER=youraddress@gmail.com
@@ -19,15 +22,23 @@
  *    (Any SMTP provider works — Gmail, Brevo/Sendinblue, Resend, SendGrid, etc.
  *     Just change SMTP_HOST/PORT accordingly.)
  *
- * 3) In your main server file (e.g. index.js / server.js), where you already
- *    do `const admin = require('firebase-admin')` and `const db = admin.firestore()`,
- *    add:
+ * 3) In src/index.js, add ONE require line next to your other route requires
+ *    (aiRoutes, buildRoutes, authRoutes, etc. near the top of the file):
  *
- *      const forgotPasswordRoutes = require('./forgotPassword-routes')(admin, db);
+ *      const forgotPasswordRoutes = require('./routes/forgotPassword-routes');
+ *
+ *    Then ONE app.use line next to your other app.use('/api/...') lines:
+ *
  *      app.use('/api/auth/forgot-password', forgotPasswordRoutes);
+ *
+ *    This file does NOT need admin/db passed in — it grabs the already-
+ *    initialized firebase-admin instance itself (same singleton your other
+ *    route files like auth.js already initialized), so no changes needed
+ *    to your firebase init code at all.
  *
  *    This mounts:
  *      POST /api/auth/forgot-password/send-otp
+
  *      POST /api/auth/forgot-password/verify-otp
  *      POST /api/auth/forgot-password/reset
  *
@@ -52,9 +63,9 @@
 const express = require('express');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
+const admin = require('firebase-admin'); // already initialized elsewhere (e.g. routes/auth.js) — same singleton
 
-module.exports = function (admin, db) {
-  const router = express.Router();
+const router = express.Router();
 
   const OTP_TTL_MS = 5 * 60 * 1000;        // 5 minutes
   const RESET_TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -80,6 +91,7 @@ module.exports = function (admin, db) {
   // ── 1) SEND OTP ──────────────────────────────────────────────────────
   router.post('/send-otp', async (req, res) => {
     try {
+      const db = admin.firestore();
       const email = String(req.body.email || '').trim().toLowerCase();
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return res.status(400).json({ error: 'Valid email required' });
@@ -131,6 +143,7 @@ module.exports = function (admin, db) {
   // ── 2) VERIFY OTP ────────────────────────────────────────────────────
   router.post('/verify-otp', async (req, res) => {
     try {
+      const db = admin.firestore();
       const email = String(req.body.email || '').trim().toLowerCase();
       const otp = String(req.body.otp || '').trim();
       if (!email || !/^\d{6}$/.test(otp)) {
@@ -172,6 +185,7 @@ module.exports = function (admin, db) {
   // ── 3) RESET PASSWORD ────────────────────────────────────────────────
   router.post('/reset', async (req, res) => {
     try {
+      const db = admin.firestore();
       const email = String(req.body.email || '').trim().toLowerCase();
       const resetToken = String(req.body.resetToken || '').trim();
       const newPassword = String(req.body.newPassword || '');
@@ -204,5 +218,4 @@ module.exports = function (admin, db) {
     }
   });
 
-  return router;
-};
+module.exports = router;
