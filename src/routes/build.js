@@ -5,6 +5,7 @@ const { requireAuth, requireCredits } = require('../middleware/auth');
 const { getDB } = require('../services/firebase');
 const github = require('../services/github');
 const { generateProjectFiles } = require('../services/builder');
+const { getFeaturesByIds } = require('../data/featureCatalog');
 
 const router = express.Router();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -58,7 +59,8 @@ router.post('/start', requireAuth, async (req, res) => {
     iconBase64         = null,
     keystore           = {},
     admob              = null,
-    isUpdate           = false
+    isUpdate           = false,
+    featureIds         = []
   } = req.body;
 
   // Merge permissions + customPermissions (deduplicate)
@@ -87,6 +89,14 @@ router.post('/start', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Invalid package name format' });
   if (!['apk', 'aab'].includes(buildType))
     return res.status(400).json({ error: 'buildType must be apk or aab' });
+
+  // Feature IDs validate karo — catalog mein na hone par build shuru mat karo
+  const resolvedFeatures = getFeaturesByIds(featureIds);
+  if (featureIds.length && resolvedFeatures.length !== featureIds.length) {
+    const validIds = resolvedFeatures.map(f => f.id);
+    const invalidIds = featureIds.filter(id => !validIds.includes(id));
+    return res.status(400).json({ error: `Unknown feature id(s): ${invalidIds.join(', ')}` });
+  }
 
   const buildId  = uuidv4();
   // Repo name based on packageName so same app reuses same repo & keystore
@@ -142,6 +152,7 @@ router.post('/start', requireAuth, async (req, res) => {
       targetSdk,
       orientation,
       permissions:  allPermissions,
+      featureIds,
       buildType,
       repoName,
       keystoreAlias: ksAlias,
@@ -181,7 +192,7 @@ router.post('/start', requireAuth, async (req, res) => {
       htmlCode, appName, packageName,
       versionCode, versionName, minSdk, targetSdk,
       orientation, permissions: allPermissions, buildType,
-      iconBase64, admob,
+      iconBase64, admob, featureIds,
       keystoreConfig: { alias: ksAlias, storePassword: ksStorePass, keyPassword: ksKeyPass, cn: ksCN, org: ksOrg, country: ksCountry }
     }).catch(err => {
       console.error(`[Build ${finalBuildId}] Fatal:`, err.message);
