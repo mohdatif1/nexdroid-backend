@@ -1,7 +1,9 @@
 // Generates all files needed for a Capacitor Android build
 // Supports both APK (assembleRelease) and AAB (bundleRelease)
 
-function generateAndroidManifest(appName, packageName, versionCode, versionName, minSdk, orientation, permissions, targetSdk = '34') {
+const { getFeaturesByIds } = require('../data/featureCatalog');
+
+function generateAndroidManifest(appName, packageName, versionCode, versionName, minSdk, orientation, permissions, targetSdk = '34', manifestExtras = []) {
   // Base permissions jo hamesha chahiye — INTERNET + storage (with maxSdkVersion guards)
   const BASE_PERMS = [
     { name: 'android.permission.INTERNET',              extra: '' },
@@ -65,13 +67,13 @@ ${permLines}
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
-
+${manifestExtras.length ? '\n' + manifestExtras.join('\n') + '\n' : ''}
     </application>
 
 </manifest>`;
 }
 
-function generateBuildGradle(packageName, versionCode, versionName, minSdk, targetSdk = '34') {
+function generateBuildGradle(packageName, versionCode, versionName, minSdk, targetSdk = '34', extraDependencies = []) {
   const compileSdk = Math.max(parseInt(targetSdk) || 34, 34);
   return `apply plugin: 'com.android.application'
 
@@ -114,10 +116,30 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'androidx.webkit:webkit:1.9.0'
-}`;
+${extraDependencies.length ? extraDependencies.map(d => `    ${d}`).join('\n') + '\n' : ''}}`;
 }
 
-function generateMainActivity(packageName, permissions = []) {
+function generateMainActivity(packageName, permissions = [], features = []) {
+  // ─── Feature injections — sab features se code collect karo ─────
+  const extraImports = [...new Set(features.flatMap(f => f.javaImports || []))];
+  const extraFields   = features.flatMap(f => f.javaFields || []);
+  const extraOnCreateBlocks = features.flatMap(f => f.javaOnCreateCode || []);
+  const extraMethods  = features.flatMap(f => f.javaMethods || []);
+  // Agar multiple features onBackPressed ke "else" branch ko override karna chahein,
+  // pehla wala jeetega — is se conflict clearly resolve ho jaata hai
+  const backPressedOverride = features.map(f => f.backPressedElse).find(Boolean) || null;
+  const skipDefaultLoadUrl  = features.some(f => f.skipDefaultLoadUrl === true);
+
+  const extraImportsBlock = extraImports.length ? '\n' + extraImports.join('\n') : '';
+  const extraFieldsBlock  = extraFields.length ? '\n' + extraFields.map(f => '    ' + f).join('\n') : '';
+  const extraOnCreateBlock = extraOnCreateBlocks.length ? '\n' + extraOnCreateBlocks.join('\n\n') + '\n' : '';
+  const extraMethodsBlock = extraMethods.length ? '\n' + extraMethods.join('\n\n') + '\n' : '';
+  const backPressedElseCode = backPressedOverride || 'super.onBackPressed();';
+  // Default loadUrl call — skip agar koi feature (jaise biometric lock) khud loadUrl call karta hai
+  const finalLoadUrlLine = skipDefaultLoadUrl
+    ? ''
+    : '\n        webView.loadUrl("file:///android_asset/www/index.html");';
+
   // Sirf runtime (dangerous) permissions filter karo
   const RUNTIME_PERMS = [
     'android.permission.CAMERA',
@@ -220,9 +242,9 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
-
+${extraImportsBlock}
 public class MainActivity extends AppCompatActivity {
-    private WebView webView;
+    private WebView webView;${extraFieldsBlock}
 
     // File chooser (gallery/camera picker) ke liye
     private ValueCallback<Uri[]> filePathCallback;
@@ -362,7 +384,7 @@ ${permRequestBlock}
             }
         });
 
-        webView.loadUrl("file:///android_asset/www/index.html");
+${extraOnCreateBlock}${finalLoadUrlLine}
     }
 
     // ── File chooser result handle karo ───────────────────────────────────
@@ -389,13 +411,13 @@ ${permRequestBlock}
             filePathCallback = null;
         }
     }
-${permMethodBlock}
+${permMethodBlock}${extraMethodsBlock}
     @Override
     public void onBackPressed() {
         if (webView.canGoBack()) {
             webView.goBack();
         } else {
-            super.onBackPressed();
+            ${backPressedElseCode}
         }
     }
 }`;
@@ -711,6 +733,16 @@ function injectAdmob(htmlCode, admob) {
   return result;
 }
 
+// ─── Feature JS Injection ─────────────────────────────────
+// html_js type features (offline banner, pull-to-refresh, etc.) ka
+// snippet seedha HTML mein </body> se pehle daal do
+function injectFeatureScripts(htmlCode, features) {
+  const jsFeatures = features.filter(f => f.injectionType === 'html_js' && f.jsSnippet);
+  if (!jsFeatures.length) return htmlCode;
+  const combined = jsFeatures.map(f => f.jsSnippet).join('\n');
+  return htmlCode.replace(/<\/body>/i, `${combined}\n</body>`);
+}
+
 // ─── Build full project file list ────────────────────────
 function generateProjectFiles(config, htmlCode) {
   const {
@@ -722,27 +754,37 @@ function generateProjectFiles(config, htmlCode) {
     iconBase64  = null,
     keystoreConfig = {},
     admob       = null,
+    featureIds  = [],
   } = config;
 
   const pkgPath = packageName.replace(/\./g, '/');
 
-  // Inject AdMob into HTML if configured
-  const finalHtmlCode = admob && admob.enabled ? injectAdmob(htmlCode, admob) : htmlCode;
+  // ── Feature catalog resolve karo ──────────────────────────
+  const resolvedFeatures  = getFeaturesByIds(featureIds);
+  const featurePermissions = resolvedFeatures.flatMap(f => f.permissions || []);
+  const featureGradleDeps  = resolvedFeatures.flatMap(f => f.gradleDependencies || []);
+  const featureManifestExtras = resolvedFeatures.flatMap(f => f.manifestExtras || []);
+  // User ke manually selected permissions + features se aayi permissions — dono merge
+  const allPermissions = [...new Set([...(permissions || []), ...featurePermissions])];
+
+  // Inject AdMob + feature JS (offline banner, pull-to-refresh, etc.) into HTML
+  let finalHtmlCode = admob && admob.enabled ? injectAdmob(htmlCode, admob) : htmlCode;
+  finalHtmlCode = injectFeatureScripts(finalHtmlCode, resolvedFeatures);
 
   return [
-    // HTML app source (with optional AdMob injection)
+    // HTML app source (with AdMob + feature JS injected)
     { path: 'app/src/main/assets/www/index.html', content: finalHtmlCode },
 
-    // AndroidManifest
+    // AndroidManifest — feature permissions + manifest extras merged in
     {
       path: 'app/src/main/AndroidManifest.xml',
-      content: generateAndroidManifest(appName, packageName, versionCode, versionName, minSdk, orientation, permissions, targetSdk)
+      content: generateAndroidManifest(appName, packageName, versionCode, versionName, minSdk, orientation, allPermissions, targetSdk, featureManifestExtras)
     },
 
-    // app/build.gradle
+    // app/build.gradle — feature gradle dependencies merged in
     {
       path: 'app/build.gradle',
-      content: generateBuildGradle(packageName, versionCode, versionName, minSdk, targetSdk)
+      content: generateBuildGradle(packageName, versionCode, versionName, minSdk, targetSdk, featureGradleDeps)
     },
 
     // Root build.gradle
@@ -757,10 +799,10 @@ function generateProjectFiles(config, htmlCode) {
     // Gradle wrapper properties (JAR is generated in CI via `gradle wrapper`)
     { path: 'gradle/wrapper/gradle-wrapper.properties', content: generateGradleWrapper() },
 
-    // MainActivity.java
+    // MainActivity.java — feature imports/fields/methods/back-press overrides injected
     {
       path: `app/src/main/java/${pkgPath}/MainActivity.java`,
-      content: generateMainActivity(packageName, permissions)
+      content: generateMainActivity(packageName, allPermissions, resolvedFeatures)
     },
 
     // Layout
@@ -796,6 +838,12 @@ function generateProjectFiles(config, htmlCode) {
     // App icon — all mipmap densities
     // If no icon provided, a default placeholder is used so build never fails
     ...generateIconFiles(iconBase64 || _defaultIconBase64()),
+
+    // Feature-contributed extra Java files (e.g. MediaPlaybackService.java for background media playback)
+    ...resolvedFeatures.flatMap(f => (f.extraJavaFiles || []).map(jf => ({
+      path: `app/src/main/java/${pkgPath}/${jf.fileName}`,
+      content: jf.contentTemplate(packageName)
+    }))),
   ];
 }
 
@@ -817,4 +865,4 @@ function generateFilePaths() {
 </paths>`;
 }
 
-module.exports = { generateProjectFiles, generateWorkflow, injectAdmob, generateFilePaths };
+module.exports = { generateProjectFiles, generateWorkflow, injectAdmob, injectFeatureScripts, generateFilePaths };
