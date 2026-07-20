@@ -358,10 +358,24 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
         private final Activity activity;
         MediaBridge(Activity activity) { this.activity = activity; }
 
+        // Website jitne bhi args ke saath call kare (title only, ya title+artist, ya kuch bhi nahi) —
+        // sab overloads yahan handle hote hain taaki argument-count mismatch se silently fail na ho
+        @JavascriptInterface
+        public void notifyPlaying() { notifyPlaying("", ""); }
+
+        @JavascriptInterface
+        public void notifyPlaying(String title) { notifyPlaying(title, ""); }
+
         @JavascriptInterface
         public void notifyPlaying(String title, String artist) {
             sendUpdate(title, artist, true);
         }
+
+        @JavascriptInterface
+        public void notifyPaused() { notifyPaused("", ""); }
+
+        @JavascriptInterface
+        public void notifyPaused(String title) { notifyPaused(title, ""); }
 
         @JavascriptInterface
         public void notifyPaused(String title, String artist) {
@@ -370,19 +384,34 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
 
         @JavascriptInterface
         public void stop() {
-            Intent i = new Intent(activity, MediaPlaybackService.class);
-            i.setAction("STOP");
-            activity.startService(i);
+            try {
+                Intent i = new Intent(activity, MediaPlaybackService.class);
+                i.setAction("STOP");
+                activity.startService(i);
+            } catch (Exception e) {
+                showDebugToast("AndroidMedia.stop() error: " + e.getMessage());
+            }
         }
 
         private void sendUpdate(String title, String artist, boolean isPlaying) {
-            Intent i = new Intent(activity, MediaPlaybackService.class);
-            i.setAction("UPDATE");
-            i.putExtra("title", title);
-            i.putExtra("artist", artist);
-            i.putExtra("isPlaying", isPlaying);
-            if (android.os.Build.VERSION.SDK_INT >= 26) activity.startForegroundService(i);
-            else activity.startService(i);
+            try {
+                Intent i = new Intent(activity, MediaPlaybackService.class);
+                i.setAction("UPDATE");
+                i.putExtra("title", title == null ? "" : title);
+                i.putExtra("artist", artist == null ? "" : artist);
+                i.putExtra("isPlaying", isPlaying);
+                if (android.os.Build.VERSION.SDK_INT >= 26) activity.startForegroundService(i);
+                else activity.startService(i);
+                // Debug ke liye — confirm karta hai ki website se call sahi tarike se pahuncha
+                showDebugToast((isPlaying ? "▶ Playing: " : "⏸ Paused: ") + (title == null || title.isEmpty() ? "(no title)" : title));
+            } catch (Exception e) {
+                showDebugToast("AndroidMedia notify error: " + e.getMessage());
+            }
+        }
+
+        private void showDebugToast(final String msg) {
+            activity.runOnUiThread(() ->
+                Toast.makeText(activity.getApplicationContext(), msg, Toast.LENGTH_SHORT).show());
         }
     }`
     ],
@@ -401,7 +430,9 @@ import android.app.Service;
 import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
+import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
+import android.support.v4.media.session.PlaybackStateCompat;
 import androidx.core.app.NotificationCompat;
 import androidx.media.app.NotificationCompat.MediaStyle;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
@@ -425,7 +456,21 @@ public class MediaPlaybackService extends Service {
     public void onCreate() {
         super.onCreate();
         mediaSession = new MediaSessionCompat(this, "NexdroidMediaSession");
+        // Lock screen / Bluetooth headset / Android Auto ke controls isi callback se aate hain —
+        // notification ke buttons se alag mechanism hai, isliye yeh zaroor chahiye
+        mediaSession.setCallback(new MediaSessionCompat.Callback() {
+            @Override public void onPlay()  { broadcastAction(ACTION_PLAY); }
+            @Override public void onPause() { broadcastAction(ACTION_PAUSE); }
+            @Override public void onSkipToNext()     { broadcastAction(ACTION_NEXT); }
+            @Override public void onSkipToPrevious() { broadcastAction(ACTION_PREV); }
+        });
         createChannel();
+    }
+
+    private void broadcastAction(String action) {
+        Intent broadcast = new Intent(ACTION_MEDIA_CONTROL);
+        broadcast.putExtra("action", action);
+        LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
     }
 
     private void createChannel() {
@@ -446,18 +491,36 @@ public class MediaPlaybackService extends Service {
             curTitle  = intent.getStringExtra("title");
             curArtist = intent.getStringExtra("artist");
             isPlaying = intent.getBooleanExtra("isPlaying", true);
+            updateMediaSession();
             startForeground(1, buildNotification());
         } else if (ACTION_PLAY.equals(action) || ACTION_PAUSE.equals(action)
                 || ACTION_NEXT.equals(action) || ACTION_PREV.equals(action)) {
-            // Notification button dabaya gaya — MainActivity ko batao, woh web page ko forward karega
-            Intent broadcast = new Intent(ACTION_MEDIA_CONTROL);
-            broadcast.putExtra("action", action);
-            LocalBroadcastManager.getInstance(this).sendBroadcast(broadcast);
+            // Notification/lock-screen button dabaya gaya — MainActivity ko batao, woh web page ko forward karega
+            broadcastAction(action);
         } else if ("STOP".equals(action)) {
+            if (mediaSession != null) mediaSession.setActive(false);
             stopForeground(true);
             stopSelf();
         }
         return START_NOT_STICKY;
+    }
+
+    // MediaSession ko "active" state + metadata + playback-state deta hai —
+    // isके bina lock screen controls ka dikhna guaranteed nahi hai, aur Android 14 pe
+    // mediaPlayback-type foreground service bhi is state ke bina reject ho sakti hai
+    private void updateMediaSession() {
+        if (mediaSession == null) return;
+        mediaSession.setActive(true);
+        mediaSession.setMetadata(new MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, curTitle == null || curTitle.isEmpty() ? "Now Playing" : curTitle)
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, curArtist == null ? "" : curArtist)
+            .build());
+        mediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
+            .setActions(PlaybackStateCompat.ACTION_PLAY | PlaybackStateCompat.ACTION_PAUSE
+                | PlaybackStateCompat.ACTION_PLAY_PAUSE
+                | PlaybackStateCompat.ACTION_SKIP_TO_NEXT | PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
+            .setState(isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED, 0, 1f)
+            .build());
     }
 
     private Notification buildNotification() {
