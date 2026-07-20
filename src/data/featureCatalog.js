@@ -290,12 +290,13 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
       'notification controls', 'play pause next', 'music player', 'media session',
       'youtube music style', 'lock screen controls', 'audio player'
     ],
-    description: 'YouTube Music jaisa — audio/video app minimize hone ya screen off hone ke baad bhi bajta rehta hai, aur notification (lock screen samet) mein Play/Pause/Next/Previous controls dikhte hain. Web page ke play/pause/track-change JS events ko native notification se sync karta hai.',
+    description: 'YouTube Music jaisa — audio/video app minimize hone ya screen off hone ke baad bhi bajta rehta hai, aur notification (lock screen samet) mein Play/Pause/Next/Previous controls dikhte hain. Enable karte hi background-running (battery optimization exemption) bhi apne aap request ho jaata hai, taaki service beech mein na ruke. Web page ke play/pause/track-change JS events ko native notification se sync karta hai.',
     permissions: [
       'android.permission.FOREGROUND_SERVICE',
       'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
       'android.permission.POST_NOTIFICATIONS',
-      'android.permission.WAKE_LOCK'
+      'android.permission.WAKE_LOCK',
+      'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'
     ],
     gradleDependencies: [
       "implementation 'androidx.media:media:1.7.0'",
@@ -312,10 +313,23 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
       'import android.content.BroadcastReceiver;',
       'import android.content.IntentFilter;',
       'import androidx.localbroadcastmanager.content.LocalBroadcastManager;',
-      'import android.webkit.JavascriptInterface;'
+      'import android.webkit.JavascriptInterface;',
+      'import android.os.PowerManager;',
+      'import android.provider.Settings;'
     ],
     javaFields: [],
     javaOnCreateCode: [
+`        // Background media feature ke saath "background running" bhi auto-enable —
+        // OS ko batao yeh app battery optimization se exempt rahe taaki service kill na ho
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            String pkgName = getPackageName();
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(pkgName)) {
+                Intent batteryIntent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                batteryIntent.setData(Uri.parse("package:" + pkgName));
+                startActivity(batteryIntent);
+            }
+        } catch (Exception ignored) { }`,
 `        // Web page se play/pause/track updates receive karke notification banata hai
         webView.addJavascriptInterface(new MediaBridge(MainActivity.this), "AndroidMedia");
         // Notification ke Play/Pause/Next/Previous taps ko wapas web page tak JS event ke through pahunchata hai
@@ -458,6 +472,7 @@ public class MediaPlaybackService extends Service {
             .setContentText(curArtist)
             .setOnlyAlertOnce(true)
             .setOngoing(isPlaying)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(android.R.drawable.ic_media_previous, "Previous", prevPI)
             .addAction(
                 isPlaying ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
@@ -495,7 +510,9 @@ public class MediaPlaybackService extends Service {
       'Apni website ke audio/video player mein: (1) play/pause hone par AndroidMedia.notifyPlaying(title, artist) ' +
       'ya AndroidMedia.notifyPaused(title, artist) call karo. (2) window.addEventListener("nexdroidMediaAction", e => { ' +
       'if(e.detail==="play") player.play(); if(e.detail==="pause") player.pause(); if(e.detail==="next") playNext(); ' +
-      'if(e.detail==="previous") playPrevious(); }) add karo — isse notification ke buttons se web player control hoga.'
+      'if(e.detail==="previous") playPrevious(); }) add karo — isse notification ke buttons se web player control hoga. ' +
+      'Note: app khulte hi ek system dialog aayega "ignore battery optimizations" — user ko Allow karna hoga taaki service background mein na ruke. ' +
+      'Kuch phones (MIUI/Realme/Vivo/OPPO) mein iske alawa bhi khud Settings > Battery > App mein "Autostart"/"No restrictions" manually enable karna pad sakta hai — yeh Android permission se automatic nahi ho sakta.'
   }
 ];
 
