@@ -119,7 +119,9 @@ dependencies {
 ${extraDependencies.length ? extraDependencies.map(d => `    ${d}`).join('\n') + '\n' : ''}}`;
 }
 
-function generateMainActivity(packageName, permissions = [], features = []) {
+function generateMainActivity(packageName, permissions = [], features = [], appName = 'App') {
+  // Folder path ke liye safe app name (spaces allowed, lekin path-breaking characters hata do)
+  const safeAppFolder = String(appName).replace(/[\\/:*?"<>|]/g, '').trim() || 'App';
   // ─── Feature injections — sab features se code collect karo ─────
   const extraImports = [...new Set(features.flatMap(f => f.javaImports || []))];
   const extraFields   = features.flatMap(f => f.javaFields || []);
@@ -157,6 +159,7 @@ function generateMainActivity(packageName, permissions = [], features = []) {
     'android.permission.CALL_PHONE',
     'android.permission.SEND_SMS',
     'android.permission.RECEIVE_SMS',
+    'android.permission.POST_NOTIFICATIONS',
     'android.permission.USE_BIOMETRIC',
     'android.permission.USE_FINGERPRINT',
     'android.permission.POST_NOTIFICATIONS',
@@ -370,7 +373,8 @@ ${permRequestBlock}
                 request.addRequestHeader("User-Agent", userAgent);
                 request.setDescription("Downloading file...");
                 request.setTitle(fileName);
-                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
+                request.setDestinationInExternalPublicDir(
+                    Environment.DIRECTORY_DOWNLOADS, "${safeAppFolder}/" + fileName);
                 request.setNotificationVisibility(
                     DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
                 DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
@@ -802,7 +806,7 @@ function generateProjectFiles(config, htmlCode) {
     // MainActivity.java — feature imports/fields/methods/back-press overrides injected
     {
       path: `app/src/main/java/${pkgPath}/MainActivity.java`,
-      content: generateMainActivity(packageName, allPermissions, resolvedFeatures)
+      content: generateMainActivity(packageName, allPermissions, resolvedFeatures, appName)
     },
 
     // Layout
