@@ -10,6 +10,7 @@ const adminRoutes = require('./routes/admin');
 const publicRoutes = require('./routes/public');
 const paymentRoutes = require('./routes/payment');
 const forgotPasswordRoutes = require('./routes/forgotPassword-routes');
+const featureRoutes = require('./routes/features');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -51,6 +52,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/public', publicRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/auth/forgot-password', forgotPasswordRoutes);
+app.use('/api/features', featureRoutes);
 
 // Health check
 app.get('/', (req, res) => {
