@@ -220,7 +220,17 @@ function generateMainActivity(packageName, permissions = [], features = [], appN
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == PERM_REQUEST_CODE && webView != null) {
-            webView.reload();
+            // POST_NOTIFICATIONS ke alawa koi permission thi tabhi reload karo —
+            // notification permission ka WebView content se koi lena dena nahi, reload se
+            // agar us waqt media/audio chal raha ho to woh interrupt ho jaata
+            boolean needsReload = false;
+            for (String p : permissions) {
+                if (!p.equals(android.Manifest.permission.POST_NOTIFICATIONS)) {
+                    needsReload = true;
+                    break;
+                }
+            }
+            if (needsReload) webView.reload();
         }
     }
 ` : '';
