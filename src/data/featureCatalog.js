@@ -416,6 +416,45 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
     }`
     ],
     // Yeh Service apni ek alag .java file hai — MainActivity.java ke andar nahi jaati
+    // Website ka apna JS AndroidMedia.notifyPlaying/notifyPaused call kare to woh priority se kaam karega,
+    // LEKIN agar woh na kare (ya galat tarike se kare) to yeh script khud <audio>/<video> tags dhoond ke
+    // apne aap play/pause/ended events pe AndroidMedia ko notify kar dega — koi manual integration na ho tab bhi kaam chalega
+    jsSnippet: `<script>
+(function(){
+  function tryNotify(fnName, el){
+    try {
+      if (typeof AndroidMedia === 'undefined') return;
+      var title  = el.getAttribute('data-title')  || el.title || document.title || 'Now Playing';
+      var artist = el.getAttribute('data-artist') || '';
+      AndroidMedia[fnName](title, artist);
+    } catch (e) { /* AndroidMedia interface abhi ready nahi ya error — silently ignore */ }
+  }
+  function hook(el){
+    if (!el || el.__nexdroidMediaHooked) return;
+    el.__nexdroidMediaHooked = true;
+    el.addEventListener('play',  function(){ tryNotify('notifyPlaying', el); });
+    el.addEventListener('pause', function(){ tryNotify('notifyPaused', el); });
+    el.addEventListener('ended', function(){ tryNotify('notifyPaused', el); });
+  }
+  function scanAndHook(){
+    var els = document.querySelectorAll('audio, video');
+    for (var i = 0; i < els.length; i++) hook(els[i]);
+  }
+  scanAndHook();
+  // Dynamically add hone wale audio/video players ke liye bhi (SPA / lazy-loaded players)
+  try {
+    new MutationObserver(scanAndHook).observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+  // Notification/lock-screen ke Play/Pause/Next/Previous taps wapas yahan aate hain —
+  // agar page apna khud ka listener nahi laga raha, to pehla mila hua audio/video element control ho jaayega
+  window.addEventListener('nexdroidMediaAction', function(e){
+    var el = document.querySelector('audio, video');
+    if (!el) return;
+    if (e.detail === 'play') el.play();
+    if (e.detail === 'pause') el.pause();
+  });
+})();
+</script>`,
     extraJavaFiles: [
       {
         fileName: 'MediaPlaybackService.java',
@@ -610,4 +649,4 @@ function getFeaturesByIds(ids = []) {
   return FEATURE_CATALOG.filter(f => idSet.has(f.id));
 }
 
-module.exports = { FEATURE_CATALOG, searchFeatures, getFeaturesByIds };
+module.exports = { FEATURE_CATALOG, searchFeatures, getFeaturesByIds, toSummary };
