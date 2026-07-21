@@ -338,6 +338,12 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
             public void onReceive(Context context, Intent intent) {
                 String action = intent.getStringExtra("action");
                 if (action == null || webView == null) return;
+                if (action.endsWith("ACTION_SEEK")) {
+                    long seekPos = intent.getLongExtra("seekPos", 0);
+                    webView.evaluateJavascript(
+                        "window.dispatchEvent(new CustomEvent('nexdroidMediaSeek',{detail:" + seekPos + "}))", null);
+                    return;
+                }
                 String jsAction =
                     action.endsWith("ACTION_PLAY")  ? "play"     :
                     action.endsWith("ACTION_PAUSE") ? "pause"    :
@@ -456,13 +462,19 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
     return { title: title, artist: artist, artwork: artwork };
   }
 
-  function tryNotify(fnName, el){
+  function tryNotify(fnName, el, retries){
+    retries = retries || 0;
     try {
       if (typeof AndroidMedia === 'undefined') return;
       var meta = currentMeta(el);
       var pos = safeNum(el.currentTime);
       var dur = safeNum(el.duration);
       AndroidMedia[fnName](meta.title, meta.artist, meta.artwork, pos, dur);
+      // Kai players song shuru hone ke turant baad hi navigator.mediaSession.metadata set karte hain —
+      // agar abhi tak sirf generic/document title hi mila hai, thodi der baad phir try karo (khaaskar pehle song pe)
+      if ((!meta.title || meta.title === document.title) && retries < 5) {
+        setTimeout(function(){ tryNotify(fnName, el, retries + 1); }, 400);
+      }
     } catch (e) { /* AndroidMedia interface abhi ready nahi ya error — silently ignore */ }
   }
 
@@ -485,6 +497,19 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
   try {
     new MutationObserver(scanAndHook).observe(document.documentElement, { childList: true, subtree: true });
   } catch (e) {}
+
+  // App minimize hone ke baad reopen karne par agar page fresh reload hua ho (WebView/Activity
+  // dobara bana ho) aur asal mein koi audio play nahi ho raha, to purani "abhi bhi playing" wali
+  // stuck notification ko clear kar do — warna notification aur app ki asli state mismatch ho jaati hai
+  setTimeout(function(){
+    try {
+      if (typeof AndroidMedia === 'undefined') return;
+      var els = document.querySelectorAll('audio, video');
+      var anyPlaying = false;
+      for (var i = 0; i < els.length; i++) { if (!els[i].paused) { anyPlaying = true; break; } }
+      if (!anyPlaying) AndroidMedia.stop();
+    } catch (e) {}
+  }, 1500);
 
   // Best-effort: agar website apna khud ka 'nexdroidMediaAction' listener nahi laga rahi,
   // to yahan se play/pause seedha element pe, aur next/previous common button selectors try karke click kiye jaate hain.
@@ -511,6 +536,12 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
         '[data-action="previous"]', '[class*="prev"]', '[id*="prev"]']);
       return;
     }
+  });
+
+  // Notification/lock-screen ke seekbar ko drag karne par yeh event aata hai — audio ko us position pe le jao
+  window.addEventListener('nexdroidMediaSeek', function(e){
+    var el = document.querySelector('audio, video');
+    if (el && typeof e.detail === 'number') { el.currentTime = e.detail / 1000; }
   });
 })();
 </script>`,
@@ -543,6 +574,7 @@ public class MediaPlaybackService extends Service {
     public static final String ACTION_PAUSE = "${packageName}.ACTION_PAUSE";
     public static final String ACTION_NEXT  = "${packageName}.ACTION_NEXT";
     public static final String ACTION_PREV  = "${packageName}.ACTION_PREV";
+    public static final String ACTION_SEEK  = "${packageName}.ACTION_SEEK";
     public static final String ACTION_MEDIA_CONTROL = "${packageName}.MEDIA_CONTROL";
 
     private MediaSessionCompat mediaSession;
@@ -566,6 +598,15 @@ public class MediaPlaybackService extends Service {
             @Override public void onPause() { broadcastAction(ACTION_PAUSE); }
             @Override public void onSkipToNext()     { broadcastAction(ACTION_NEXT); }
             @Override public void onSkipToPrevious() { broadcastAction(ACTION_PREV); }
+            @Override public void onSeekTo(long pos) {
+                Intent broadcast = new Intent(ACTION_MEDIA_CONTROL);
+                broadcast.putExtra("action", ACTION_SEEK);
+                broadcast.putExtra("seekPos", pos);
+                LocalBroadcastManager.getInstance(MediaPlaybackService.this).sendBroadcast(broadcast);
+                // Turant local playback-state bhi update kardo taaki scrubber lag na kare
+                curPositionMs = pos;
+                updateMediaSession();
+            }
         });
         createChannel();
     }
@@ -661,7 +702,7 @@ public class MediaPlaybackService extends Service {
         mediaSession.setMetadata(metaBuilder.build());
         mediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
             .setActions(PlaybackStateCompat.ACTION_PLAY | PlaybackStateCompat.ACTION_PAUSE
-                | PlaybackStateCompat.ACTION_PLAY_PAUSE
+                | PlaybackStateCompat.ACTION_PLAY_PAUSE | PlaybackStateCompat.ACTION_SEEK_TO
                 | PlaybackStateCompat.ACTION_SKIP_TO_NEXT | PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
             // position yahan se set hote hi Android khud real-time mein ticking progress dikhata hai
             // (jab tak agla update na aaye), playback speed 1x jab play ho raha ho, 0 jab pause ho
