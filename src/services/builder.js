@@ -239,12 +239,17 @@ function generateMainActivity(packageName, permissions = [], features = [], appN
 
 import android.app.Activity;
 import android.app.DownloadManager;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.os.Environment;
 import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.MimeTypeMap;
 import android.webkit.PermissionRequest;
 import android.webkit.URLUtil;
@@ -286,6 +291,8 @@ ${permRequestBlock}
         settings.setUserAgentString(settings.getUserAgentString());
 
         webView.setWebViewClient(new WebViewClient());
+        // Blob/data: URL downloads (jo native downloadListener miss karta hai) is bridge se aate hain
+        webView.addJavascriptInterface(new AndroidDownloader(MainActivity.this), "AndroidDownloader");
         webView.setWebChromeClient(new WebChromeClient() {
 
             // WebView permission requests (camera/mic in-browser)
@@ -446,6 +453,91 @@ ${permMethodBlock}${extraMethodsBlock}
             webView.goBack();
         } else {
             ${backPressedElseCode}
+        }
+    }
+
+    // ── Blob/data: URL downloads (webpage se aaye base64 file data ko disk pe save karta hai) ──
+    public static class AndroidDownloader {
+        private static final String CHANNEL_ID = "nexdroid_downloads";
+        private static int notifId = 5000;
+        private final Activity activity;
+
+        AndroidDownloader(Activity activity) { this.activity = activity; }
+
+        @JavascriptInterface
+        public void saveBase64File(String base64Data, String fileName, String mimeType) {
+            final int myNotifId = notifId++;
+            createChannelIfNeeded();
+            showProgressNotification(myNotifId, fileName);
+
+            new Thread(() -> {
+                try {
+                    byte[] data = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT);
+                    java.io.File dir = new java.io.File(
+                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                        "${safeAppFolder}");
+                    if (!dir.exists()) dir.mkdirs();
+                    java.io.File outFile = new java.io.File(dir, fileName);
+                    java.io.FileOutputStream fos = new java.io.FileOutputStream(outFile);
+                    fos.write(data);
+                    fos.close();
+
+                    // Downloads app/gallery mein turant dikhe, isliye media scanner ko batao
+                    Intent scanIntent = new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE);
+                    scanIntent.setData(Uri.fromFile(outFile));
+                    activity.sendBroadcast(scanIntent);
+
+                    activity.runOnUiThread(() -> showCompleteNotification(myNotifId, fileName, outFile, mimeType));
+                } catch (Exception e) {
+                    activity.runOnUiThread(() -> {
+                        Toast.makeText(activity.getApplicationContext(),
+                            "Download failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                        androidx.core.app.NotificationManagerCompat.from(activity).cancel(myNotifId);
+                    });
+                }
+            }).start();
+        }
+
+        private void createChannelIfNeeded() {
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel ch = new NotificationChannel(
+                    CHANNEL_ID, "Downloads", NotificationManager.IMPORTANCE_LOW);
+                NotificationManager nm = (NotificationManager) activity.getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm != null) nm.createNotificationChannel(ch);
+            }
+        }
+
+        private void showProgressNotification(int id, String fileName) {
+            androidx.core.app.NotificationCompat.Builder b = new androidx.core.app.NotificationCompat.Builder(activity, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle("Downloading " + fileName)
+                .setProgress(0, 0, true)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true);
+            try {
+                androidx.core.app.NotificationManagerCompat.from(activity).notify(id, b.build());
+            } catch (SecurityException se) { /* POST_NOTIFICATIONS permission na mile to bhi download chalta rahega */ }
+        }
+
+        private void showCompleteNotification(int id, String fileName, java.io.File file, String mimeType) {
+            Uri uri = androidx.core.content.FileProvider.getUriForFile(
+                activity, activity.getPackageName() + ".fileprovider", file);
+            Intent viewIntent = new Intent(Intent.ACTION_VIEW);
+            viewIntent.setDataAndType(uri, mimeType == null || mimeType.isEmpty() ? "*/*" : mimeType);
+            viewIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            int piFlags = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+            PendingIntent pi = PendingIntent.getActivity(activity, id, viewIntent, piFlags);
+
+            androidx.core.app.NotificationCompat.Builder b = new androidx.core.app.NotificationCompat.Builder(activity, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle("Download complete")
+                .setContentText(fileName)
+                .setContentIntent(pi)
+                .setAutoCancel(true)
+                .setOngoing(false);
+            try {
+                androidx.core.app.NotificationManagerCompat.from(activity).notify(id, b.build());
+            } catch (SecurityException se) { }
         }
     }
 }`;
@@ -773,6 +865,41 @@ function injectFeatureScripts(htmlCode, features) {
   return htmlCode.replace(/<\/body>/i, `${combined}\n</body>`);
 }
 
+// ─── Base Blob-Download Handler ────────────────────────────
+// WebView ka native setDownloadListener sirf real network URLs (jinme Content-Disposition
+// header ho) pe fire hota hai — modern web apps jo JS se Blob banake <a download> ke through
+// download karvate hain (fetch + blob + createObjectURL), unke liye woh listener KABHI fire
+// nahi hota. Yeh script har build mein hamesha inject hoti hai (feature nahi hai) taaki
+// blob:/data: URL wale downloads bhi pakde jaayein aur AndroidDownloader bridge tak pahunche.
+function injectBlobDownloadScript(htmlCode) {
+  const script = `<script>
+(function(){
+  document.addEventListener('click', function(e){
+    var a = e.target && e.target.closest ? e.target.closest('a[download]') : null;
+    if (!a) return;
+    var href = a.getAttribute('href') || '';
+    if (href.indexOf('blob:') !== 0 && href.indexOf('data:') !== 0) return; // normal URL — native downloadListener isse handle karega
+    if (typeof AndroidDownloader === 'undefined') return;
+    e.preventDefault();
+    e.stopPropagation();
+    var fileName = a.getAttribute('download') || 'download';
+    fetch(href).then(function(res){ return res.blob(); }).then(function(blob){
+      var mime = blob.type || 'application/octet-stream';
+      var reader = new FileReader();
+      reader.onloadend = function(){
+        try {
+          var base64 = String(reader.result).split(',')[1] || '';
+          AndroidDownloader.saveBase64File(base64, fileName, mime);
+        } catch (err) {}
+      };
+      reader.readAsDataURL(blob);
+    }).catch(function(){});
+  }, true);
+})();
+</script>`;
+  return htmlCode.replace(/<\/body>/i, `${script}\n</body>`);
+}
+
 // ─── Build full project file list ────────────────────────
 function generateProjectFiles(config, htmlCode) {
   const {
@@ -797,9 +924,10 @@ function generateProjectFiles(config, htmlCode) {
   // User ke manually selected permissions + features se aayi permissions — dono merge
   const allPermissions = [...new Set([...(permissions || []), ...featurePermissions])];
 
-  // Inject AdMob + feature JS (offline banner, pull-to-refresh, etc.) into HTML
+  // Inject AdMob + feature JS (offline banner, pull-to-refresh, etc.) + base blob-download-handler into HTML
   let finalHtmlCode = admob && admob.enabled ? injectAdmob(htmlCode, admob) : htmlCode;
   finalHtmlCode = injectFeatureScripts(finalHtmlCode, resolvedFeatures);
+  finalHtmlCode = injectBlobDownloadScript(finalHtmlCode);
 
   return [
     // HTML app source (with AdMob + feature JS injected)
