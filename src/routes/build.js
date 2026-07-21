@@ -5,7 +5,7 @@ const { requireAuth, requireCredits } = require('../middleware/auth');
 const { getDB } = require('../services/firebase');
 const github = require('../services/github');
 const { generateProjectFiles } = require('../services/builder');
-const { getFeaturesByIds } = require('../data/featureCatalog');
+const { getFeaturesByIds, toSummary } = require('../data/featureCatalog');
 
 const router = express.Router();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -191,7 +191,7 @@ router.post('/start', requireAuth, async (req, res) => {
     runBuildPipeline(finalBuildId, repoName, uid, {
       htmlCode, appName, packageName,
       versionCode, versionName, minSdk, targetSdk,
-      orientation, permissions: allPermissions, buildType,
+      orientation, permissions: allPermissions, customPermissions, buildType,
       iconBase64, admob, featureIds,
       keystoreConfig: { alias: ksAlias, storePassword: ksStorePass, keyPassword: ksKeyPass, cn: ksCN, org: ksOrg, country: ksCountry }
     }).catch(err => {
@@ -409,6 +409,40 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
       : 'Build complete! Signed APK ready to install.';
     await log(doneMsg, 100);
 
+    // ── Build successful hone par app ki poori details Firestore mein snapshot karo ──
+    // (features, unse aayi dependencies/permissions, icon, admob config, custom perms, etc.)
+    const resolvedFeatures  = getFeaturesByIds(config.featureIds || []);
+    const featureSummaries  = resolvedFeatures.map(toSummary);
+    const featureGradleDeps = [...new Set(resolvedFeatures.flatMap(f => f.gradleDependencies || []))];
+    const featurePermsFromCatalog = [...new Set(resolvedFeatures.flatMap(f => f.permissions || []))];
+
+    const appDetails = {
+      appName:            config.appName,
+      packageName:        config.packageName,
+      versionCode:        config.versionCode,
+      versionName:        config.versionName,
+      minSdk:             config.minSdk,
+      targetSdk:          config.targetSdk,
+      orientation:        config.orientation,
+      buildType:          config.buildType,
+      permissions:        config.permissions || [],          // final merged list (base + custom + feature perms)
+      customPermissions:  config.customPermissions || [],
+      features:           featureSummaries,                   // full details: name/category/description/permissions/dependencies
+      featureIds:         config.featureIds || [],
+      gradleDependencies: featureGradleDeps,                  // sirf features se aayi extra dependencies
+      featurePermissions: featurePermsFromCatalog,
+      iconBase64:         config.iconBase64 || null,
+      admob: config.admob ? {
+        enabled:     !!config.admob.enabled,
+        appId:       config.admob.appId       || null,
+        bannerId:    config.admob.bannerId    || null,
+        interId:     config.admob.interId     || null,
+        position:    config.admob.position    || null
+      } : { enabled: false },
+      keystoreAlias:      config.keystoreConfig ? config.keystoreConfig.alias : null,
+      updatedAt: new Date()
+    };
+
     await db.collection('builds').doc(buildId).update({
       status:      'success',
       progress:    100,
@@ -417,9 +451,21 @@ async function runBuildPipeline(buildId, repoName, uid, config) {
       repoName,
       apkUrl:      isAAB ? null : artifactInfo.downloadUrl,
       aabUrl:      isAAB ? artifactInfo.downloadUrl : null,
+      hasAppDetails: true,
       completedAt: new Date(),
       updatedAt:   new Date()
     });
+
+    // App details (icon samet) alag subcollection document mein — parent 'builds' doc mein
+    // pehle se htmlCode store hota hai, dono ko ek hi document mein rakhne se Firestore ki
+    // 1MB per-document limit hit ho sakti thi, isliye alag rakha
+    try {
+      await db.collection('builds').doc(buildId)
+        .collection('meta').doc('appDetails')
+        .set(appDetails);
+    } catch (metaErr) {
+      console.error(`[Build ${buildId}] appDetails save failed (build itself succeeded):`, metaErr.message);
+    }
 
     await db.collection('users').doc(uid).update({
       totalBuilds: admin.firestore.FieldValue.increment(1)
@@ -673,6 +719,37 @@ router.get('/user/list', requireAuth, async (req, res) => {
 });
 
 // ─── GET /api/build/:id ───────────────────────────────────
+// ─── GET /api/build/:id/details ──────────────────────────
+// Successful build ki poori details — features, unse aayi dependencies/permissions, icon, admob, etc.
+router.get('/:id/details', requireAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const db  = getDB();
+    const doc = await db.collection('builds').doc(id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'Build not found' });
+
+    const data = doc.data();
+    if (data.uid !== req.user.uid && !req.userData?.isAdmin)
+      return res.status(403).json({ error: 'Access denied' });
+
+    if (!data.hasAppDetails) {
+      return res.json({ found: false, message: 'Details not available for this build yet' });
+    }
+
+    const detailsDoc = await db.collection('builds').doc(id)
+      .collection('meta').doc('appDetails').get();
+
+    if (!detailsDoc.exists) {
+      return res.json({ found: false, message: 'Details not available for this build yet' });
+    }
+
+    res.json({ found: true, ...detailsDoc.data() });
+  } catch (err) {
+    console.error('[BuildDetails]', err.message);
+    res.status(500).json({ error: 'Failed to fetch app details' });
+  }
+});
+
 router.get('/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
