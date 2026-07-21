@@ -451,9 +451,33 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
         if (md.artwork && md.artwork.length) artwork = md.artwork[md.artwork.length - 1].src || '';
       }
     } catch (e) {}
-    // Fallback — common data attributes ya document title
-    if (!title)  title  = el.getAttribute('data-title')  || el.title || document.title || 'Now Playing';
+    // Fallback 1 — element ke apne data attributes
+    if (!title)  title  = el.getAttribute('data-title')  || el.title || '';
     if (!artist) artist = el.getAttribute('data-artist') || '';
+    // Fallback 2 — common "now playing" bar mein milne wale class/id patterns try karo
+    // (kai music web apps mein song-title/track-title/now-playing-title jaisi classes hoti hain)
+    if (!title) {
+      var titleGuess = document.querySelector(
+        '[class*="song-title"], [class*="track-title"], [class*="now-playing-title"], ' +
+        '[class*="player-title"], [class*="playing-title"], [class*="current-title"], ' +
+        '[id*="song-title"], [id*="track-title"], [id*="now-playing-title"]'
+      );
+      if (titleGuess && titleGuess.textContent && titleGuess.textContent.trim()) {
+        title = titleGuess.textContent.trim();
+      }
+    }
+    if (!artist) {
+      var artistGuess = document.querySelector(
+        '[class*="song-artist"], [class*="track-artist"], [class*="now-playing-artist"], ' +
+        '[class*="player-artist"], [class*="playing-artist"], [class*="current-artist"], ' +
+        '[id*="song-artist"], [id*="track-artist"], [id*="artist-name"]'
+      );
+      if (artistGuess && artistGuess.textContent && artistGuess.textContent.trim()) {
+        artist = artistGuess.textContent.trim();
+      }
+    }
+    // Sab kuch fail ho jaaye to hi generic document title use karo (last resort)
+    if (!title) title = document.title || 'Now Playing';
     if (!artwork) {
       // Ek common pattern try karo: player ke aas-paas koi image jisme "cover"/"art"/"thumb" class/id ho
       var imgGuess = document.querySelector('[class*="cover"] img, [class*="art"] img, [class*="thumb"] img, [id*="cover"] img, [id*="art"] img');
@@ -527,13 +551,15 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
     if (e.detail === 'play' && el) { el.play(); return; }
     if (e.detail === 'pause' && el) { el.pause(); return; }
     if (e.detail === 'next') {
-      clickIfFound(['[aria-label="Next"]', '[aria-label="next"]', '.next-btn', '#next-btn',
-        '[data-action="next"]', '[class*="next"]', '[id*="next"]']);
+      clickIfFound(['[aria-label="Next"]', '[aria-label="next"]', '[aria-label*="Next" i]',
+        '.next-btn', '#next-btn', '[data-action="next"]', '[data-testid*="next" i]',
+        '.rhap_forward-button', '.plyr__control--next', '[class*="next"]', '[id*="next"]']);
       return;
     }
     if (e.detail === 'previous') {
-      clickIfFound(['[aria-label="Previous"]', '[aria-label="previous"]', '.prev-btn', '#prev-btn',
-        '[data-action="previous"]', '[class*="prev"]', '[id*="prev"]']);
+      clickIfFound(['[aria-label="Previous"]', '[aria-label="previous"]', '[aria-label*="Previous" i]',
+        '.prev-btn', '#prev-btn', '[data-action="previous"]', '[data-testid*="prev" i]',
+        '.rhap_rewind-button', '.plyr__control--rewind', '[class*="prev"]', '[id*="prev"]']);
       return;
     }
   });
