@@ -267,6 +267,11 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        // Chrome se "chrome://inspect" khol ke phone ko USB se connect karo — WebView ke
+        // console errors/logs seedhe dekh sakte ho. Debugging ke baad chaho to yeh line hata sakte ho.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
+            WebView.setWebContentsDebuggingEnabled(true);
+        }
 ${permRequestBlock}
         webView = findViewById(R.id.webview);
         WebSettings settings = webView.getSettings();
@@ -333,6 +338,15 @@ ${permRequestBlock}
                         "File picker error: " + e.getMessage(), Toast.LENGTH_SHORT).show();
                     return false;
                 }
+                return true;
+            }
+
+            // Website ki JS console errors Logcat mein bhejta hai — "adb logcat" mein
+            // "NexDroidWeb" tag search karke dekha ja sakta hai (jaise AndroidMedia call fail ho to yahin dikhega)
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage cm) {
+                android.util.Log.d("NexDroidWeb", cm.message() + " -- From line "
+                    + cm.lineNumber() + " of " + cm.sourceId());
                 return true;
             }
         });
@@ -748,10 +762,11 @@ function injectAdmob(htmlCode, admob) {
 }
 
 // ─── Feature JS Injection ─────────────────────────────────
-// html_js type features (offline banner, pull-to-refresh, etc.) ka
-// snippet seedha HTML mein </body> se pehle daal do
+// jsSnippet wale kisi bhi feature ka snippet seedha HTML mein </body> se pehle daal do
+// (chaahe woh pure html_js feature ho jaise offline banner, ya java-type feature jise
+// extra web-side JS bhi chahiye ho jaise background_media_playback)
 function injectFeatureScripts(htmlCode, features) {
-  const jsFeatures = features.filter(f => f.injectionType === 'html_js' && f.jsSnippet);
+  const jsFeatures = features.filter(f => f.jsSnippet);
   if (!jsFeatures.length) return htmlCode;
   const combined = jsFeatures.map(f => f.jsSnippet).join('\n');
   return htmlCode.replace(/<\/body>/i, `${combined}\n</body>`);
