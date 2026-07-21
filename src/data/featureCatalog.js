@@ -354,32 +354,39 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
     ],
     javaMethods: [
 `    // JS se call hota hai: AndroidMedia.notifyPlaying(title, artist) / notifyPaused(...) / stop()
+    // Richer version: notifyPlaying(title, artist, artworkUrl, positionSec, durationSec) — image + seekbar ke liye
     public static class MediaBridge {
         private final Activity activity;
         MediaBridge(Activity activity) { this.activity = activity; }
 
-        // Website jitne bhi args ke saath call kare (title only, ya title+artist, ya kuch bhi nahi) —
-        // sab overloads yahan handle hote hain taaki argument-count mismatch se silently fail na ho
+        // Website jitne bhi args ke saath call kare — sab overloads yahan handle hote hain
+        // taaki argument-count mismatch se silently fail na ho
         @JavascriptInterface
-        public void notifyPlaying() { notifyPlaying("", ""); }
+        public void notifyPlaying() { notifyPlaying("", "", "", 0, 0); }
 
         @JavascriptInterface
-        public void notifyPlaying(String title) { notifyPlaying(title, ""); }
+        public void notifyPlaying(String title) { notifyPlaying(title, "", "", 0, 0); }
 
         @JavascriptInterface
-        public void notifyPlaying(String title, String artist) {
-            sendUpdate(title, artist, true);
+        public void notifyPlaying(String title, String artist) { notifyPlaying(title, artist, "", 0, 0); }
+
+        @JavascriptInterface
+        public void notifyPlaying(String title, String artist, String artworkUrl, double positionSec, double durationSec) {
+            sendUpdate(title, artist, artworkUrl, positionSec, durationSec, true);
         }
 
         @JavascriptInterface
-        public void notifyPaused() { notifyPaused("", ""); }
+        public void notifyPaused() { notifyPaused("", "", "", 0, 0); }
 
         @JavascriptInterface
-        public void notifyPaused(String title) { notifyPaused(title, ""); }
+        public void notifyPaused(String title) { notifyPaused(title, "", "", 0, 0); }
 
         @JavascriptInterface
-        public void notifyPaused(String title, String artist) {
-            sendUpdate(title, artist, false);
+        public void notifyPaused(String title, String artist) { notifyPaused(title, artist, "", 0, 0); }
+
+        @JavascriptInterface
+        public void notifyPaused(String title, String artist, String artworkUrl, double positionSec, double durationSec) {
+            sendUpdate(title, artist, artworkUrl, positionSec, durationSec, false);
         }
 
         @JavascriptInterface
@@ -393,12 +400,15 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
             }
         }
 
-        private void sendUpdate(String title, String artist, boolean isPlaying) {
+        private void sendUpdate(String title, String artist, String artworkUrl, double positionSec, double durationSec, boolean isPlaying) {
             try {
                 Intent i = new Intent(activity, MediaPlaybackService.class);
                 i.setAction("UPDATE");
                 i.putExtra("title", title == null ? "" : title);
                 i.putExtra("artist", artist == null ? "" : artist);
+                i.putExtra("artworkUrl", artworkUrl == null ? "" : artworkUrl);
+                i.putExtra("positionMs", (long) (positionSec * 1000));
+                i.putExtra("durationMs", (long) (durationSec * 1000));
                 i.putExtra("isPlaying", isPlaying);
                 if (android.os.Build.VERSION.SDK_INT >= 26) activity.startForegroundService(i);
                 else activity.startService(i);
@@ -421,21 +431,51 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
     // apne aap play/pause/ended events pe AndroidMedia ko notify kar dega — koi manual integration na ho tab bhi kaam chalega
     jsSnippet: `<script>
 (function(){
+  function safeNum(n){ return (typeof n === 'number' && isFinite(n)) ? n : 0; }
+
+  function currentMeta(el){
+    var title = '', artist = '', artwork = '';
+    // Modern web players (jaise Spotify-style apps) usually Web MediaSession API use karte hain —
+    // wahan se metadata milna sabse reliable hai
+    try {
+      if (navigator.mediaSession && navigator.mediaSession.metadata) {
+        var md = navigator.mediaSession.metadata;
+        title  = md.title  || '';
+        artist = md.artist || '';
+        if (md.artwork && md.artwork.length) artwork = md.artwork[md.artwork.length - 1].src || '';
+      }
+    } catch (e) {}
+    // Fallback — common data attributes ya document title
+    if (!title)  title  = el.getAttribute('data-title')  || el.title || document.title || 'Now Playing';
+    if (!artist) artist = el.getAttribute('data-artist') || '';
+    if (!artwork) {
+      // Ek common pattern try karo: player ke aas-paas koi image jisme "cover"/"art"/"thumb" class/id ho
+      var imgGuess = document.querySelector('[class*="cover"] img, [class*="art"] img, [class*="thumb"] img, [id*="cover"] img, [id*="art"] img');
+      if (imgGuess && imgGuess.src) artwork = imgGuess.src;
+    }
+    return { title: title, artist: artist, artwork: artwork };
+  }
+
   function tryNotify(fnName, el){
     try {
       if (typeof AndroidMedia === 'undefined') return;
-      var title  = el.getAttribute('data-title')  || el.title || document.title || 'Now Playing';
-      var artist = el.getAttribute('data-artist') || '';
-      AndroidMedia[fnName](title, artist);
+      var meta = currentMeta(el);
+      var pos = safeNum(el.currentTime);
+      var dur = safeNum(el.duration);
+      AndroidMedia[fnName](meta.title, meta.artist, meta.artwork, pos, dur);
     } catch (e) { /* AndroidMedia interface abhi ready nahi ya error — silently ignore */ }
   }
+
   function hook(el){
     if (!el || el.__nexdroidMediaHooked) return;
     el.__nexdroidMediaHooked = true;
-    el.addEventListener('play',  function(){ tryNotify('notifyPlaying', el); });
-    el.addEventListener('pause', function(){ tryNotify('notifyPaused', el); });
-    el.addEventListener('ended', function(){ tryNotify('notifyPaused', el); });
+    el.addEventListener('play',           function(){ tryNotify('notifyPlaying', el); });
+    el.addEventListener('pause',          function(){ tryNotify('notifyPaused', el); });
+    el.addEventListener('ended',          function(){ tryNotify('notifyPaused', el); });
+    // Track change / seek hone par bhi notification (title-artist-art-time) refresh ho
+    el.addEventListener('loadedmetadata', function(){ if (!el.paused) tryNotify('notifyPlaying', el); });
   }
+
   function scanAndHook(){
     var els = document.querySelectorAll('audio, video');
     for (var i = 0; i < els.length; i++) hook(els[i]);
@@ -445,13 +485,32 @@ text-align:center;padding:8px 12px;font:600 13px sans-serif;display:none;}
   try {
     new MutationObserver(scanAndHook).observe(document.documentElement, { childList: true, subtree: true });
   } catch (e) {}
-  // Notification/lock-screen ke Play/Pause/Next/Previous taps wapas yahan aate hain —
-  // agar page apna khud ka listener nahi laga raha, to pehla mila hua audio/video element control ho jaayega
+
+  // Best-effort: agar website apna khud ka 'nexdroidMediaAction' listener nahi laga rahi,
+  // to yahan se play/pause seedha element pe, aur next/previous common button selectors try karke click kiye jaate hain.
+  // 100% reliability ke liye best hai ki website khud apne "next song"/"previous song" function ko
+  // is event se call kare — is auto-click ka bharosa sirf tab tak jab tak selectors match karein.
+  function clickIfFound(selectors){
+    for (var i = 0; i < selectors.length; i++) {
+      var el = document.querySelector(selectors[i]);
+      if (el) { el.click(); return true; }
+    }
+    return false;
+  }
   window.addEventListener('nexdroidMediaAction', function(e){
     var el = document.querySelector('audio, video');
-    if (!el) return;
-    if (e.detail === 'play') el.play();
-    if (e.detail === 'pause') el.pause();
+    if (e.detail === 'play' && el) { el.play(); return; }
+    if (e.detail === 'pause' && el) { el.pause(); return; }
+    if (e.detail === 'next') {
+      clickIfFound(['[aria-label="Next"]', '[aria-label="next"]', '.next-btn', '#next-btn',
+        '[data-action="next"]', '[class*="next"]', '[id*="next"]']);
+      return;
+    }
+    if (e.detail === 'previous') {
+      clickIfFound(['[aria-label="Previous"]', '[aria-label="previous"]', '.prev-btn', '#prev-btn',
+        '[data-action="previous"]', '[class*="prev"]', '[id*="prev"]']);
+      return;
+    }
   });
 })();
 </script>`,
@@ -487,9 +546,14 @@ public class MediaPlaybackService extends Service {
     public static final String ACTION_MEDIA_CONTROL = "${packageName}.MEDIA_CONTROL";
 
     private MediaSessionCompat mediaSession;
-    private String  curTitle  = "";
-    private String  curArtist = "";
-    private boolean isPlaying = false;
+    private String  curTitle    = "";
+    private String  curArtist   = "";
+    private String  curArtworkUrl = "";
+    private long    curPositionMs = 0;
+    private long    curDurationMs = 0;
+    private boolean isPlaying   = false;
+    private android.graphics.Bitmap curArtwork = null;
+    private int     artworkRequestToken = 0;
 
     @Override
     public void onCreate() {
@@ -527,11 +591,24 @@ public class MediaPlaybackService extends Service {
         String action = intent.getAction();
 
         if ("UPDATE".equals(action)) {
-            curTitle  = intent.getStringExtra("title");
-            curArtist = intent.getStringExtra("artist");
-            isPlaying = intent.getBooleanExtra("isPlaying", true);
+            curTitle      = intent.getStringExtra("title");
+            curArtist     = intent.getStringExtra("artist");
+            curPositionMs = intent.getLongExtra("positionMs", 0);
+            curDurationMs = intent.getLongExtra("durationMs", 0);
+            isPlaying     = intent.getBooleanExtra("isPlaying", true);
+            String newArtworkUrl = intent.getStringExtra("artworkUrl");
+
+            // Notification turant dikhao (5-second startForeground rule ke andar), art baad mein update ho jaayega
             updateMediaSession();
             startForeground(1, buildNotification());
+
+            if (newArtworkUrl != null && !newArtworkUrl.isEmpty() && !newArtworkUrl.equals(curArtworkUrl)) {
+                curArtworkUrl = newArtworkUrl;
+                loadArtworkAsync(newArtworkUrl);
+            } else if (newArtworkUrl == null || newArtworkUrl.isEmpty()) {
+                curArtworkUrl = "";
+                curArtwork = null;
+            }
         } else if (ACTION_PLAY.equals(action) || ACTION_PAUSE.equals(action)
                 || ACTION_NEXT.equals(action) || ACTION_PREV.equals(action)) {
             // Notification/lock-screen button dabaya gaya — MainActivity ko batao, woh web page ko forward karega
@@ -544,21 +621,52 @@ public class MediaPlaybackService extends Service {
         return START_NOT_STICKY;
     }
 
+    // Album art background thread pe download karta hai (network kabhi bhi main thread pe nahi) —
+    // load hone ke baad notification + MediaSession dono ko naye artwork ke saath refresh kar deta hai
+    private void loadArtworkAsync(final String url) {
+        final int myToken = ++artworkRequestToken;
+        new Thread(() -> {
+            android.graphics.Bitmap bmp = null;
+            try {
+                java.net.URL u = new java.net.URL(url);
+                java.io.InputStream is = u.openStream();
+                bmp = android.graphics.BitmapFactory.decodeStream(is);
+                is.close();
+            } catch (Exception e) {
+                // Artwork load fail — bina image ke hi notification chalta rahega
+            }
+            final android.graphics.Bitmap finalBmp = bmp;
+            if (myToken != artworkRequestToken) return; // is beech koi naya track aa gaya, yeh purana result discard karo
+            new android.os.Handler(getMainLooper()).post(() -> {
+                curArtwork = finalBmp;
+                updateMediaSession();
+                startForeground(1, buildNotification());
+            });
+        }).start();
+    }
+
     // MediaSession ko "active" state + metadata + playback-state deta hai —
     // isके bina lock screen controls ka dikhna guaranteed nahi hai, aur Android 14 pe
     // mediaPlayback-type foreground service bhi is state ke bina reject ho sakti hai
     private void updateMediaSession() {
         if (mediaSession == null) return;
         mediaSession.setActive(true);
-        mediaSession.setMetadata(new MediaMetadataCompat.Builder()
+        MediaMetadataCompat.Builder metaBuilder = new MediaMetadataCompat.Builder()
             .putString(MediaMetadataCompat.METADATA_KEY_TITLE, curTitle == null || curTitle.isEmpty() ? "Now Playing" : curTitle)
             .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, curArtist == null ? "" : curArtist)
-            .build());
+            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, curDurationMs > 0 ? curDurationMs : -1);
+        if (curArtwork != null) {
+            metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, curArtwork);
+        }
+        mediaSession.setMetadata(metaBuilder.build());
         mediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
             .setActions(PlaybackStateCompat.ACTION_PLAY | PlaybackStateCompat.ACTION_PAUSE
                 | PlaybackStateCompat.ACTION_PLAY_PAUSE
                 | PlaybackStateCompat.ACTION_SKIP_TO_NEXT | PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
-            .setState(isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED, 0, 1f)
+            // position yahan se set hote hi Android khud real-time mein ticking progress dikhata hai
+            // (jab tak agla update na aaye), playback speed 1x jab play ho raha ho, 0 jab pause ho
+            .setState(isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED,
+                curPositionMs, isPlaying ? 1f : 0f)
             .build());
     }
 
@@ -568,7 +676,7 @@ public class MediaPlaybackService extends Service {
         PendingIntent nextPI  = servicePendingIntent(ACTION_NEXT);
         PendingIntent prevPI  = servicePendingIntent(ACTION_PREV);
 
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(curTitle == null || curTitle.isEmpty() ? "Now Playing" : curTitle)
             .setContentText(curArtist)
@@ -583,8 +691,11 @@ public class MediaPlaybackService extends Service {
             .addAction(android.R.drawable.ic_media_next, "Next", nextPI)
             .setStyle(new MediaStyle()
                 .setMediaSession(mediaSession.getSessionToken())
-                .setShowActionsInCompactView(0, 1, 2))
-            .build();
+                .setShowActionsInCompactView(0, 1, 2));
+        if (curArtwork != null) {
+            builder.setLargeIcon(curArtwork);
+        }
+        return builder.build();
     }
 
     private PendingIntent servicePendingIntent(String action) {
